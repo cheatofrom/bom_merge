@@ -1,7 +1,7 @@
 // 零部件类型定义
 export interface Part {
   id: number;
-  level: string;
+  level: number;
   part_code: string;
   part_name: string;
   spec: string;
@@ -18,6 +18,7 @@ export interface Part {
   remark: string;
   upload_batch: string;
   project_name: string;
+  file_unique_id: string;
   created_at: string;
 }
 
@@ -25,12 +26,14 @@ export interface Part {
 export interface Project {
   project_name: string;
   upload_batch: string;
+  file_unique_id: string;
 }
 
 // 项目备注类型定义
 export interface ProjectNote {
   id?: number;
   project_name: string;
+  file_unique_id?: string;
   note: string;
   created_at?: string;
   updated_at?: string;

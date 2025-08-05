@@ -4,7 +4,7 @@ import numpy as np
 import tempfile
 import os
 
-def import_excel_to_db(file_stream, upload_batch, project_name):
+def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=None):
     # 创建一个临时文件来解决SpooledTemporaryFile的兼容性问题
     with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp:
         # 将上传的文件内容写入临时文件
@@ -16,17 +16,10 @@ def import_excel_to_db(file_stream, upload_batch, project_name):
         # 使用临时文件路径读取Excel，并指定读取"BOM"工作表
         xls = pd.ExcelFile(tmp_path)
         
-        # 查找名为"BOM"的工作表（忽略前后空格）
-        bom_sheet = None
-        for sheet_name in xls.sheet_names:
-            if sheet_name.strip().upper() == "BOM":
-                bom_sheet = sheet_name
-                break
-        
-        # 如果找不到"BOM"工作表，尝试使用第三个工作表（索引为2）
-        if not bom_sheet and len(xls.sheet_names) >= 3:
+        # 直接使用第三个工作表（索引为2）
+        if len(xls.sheet_names) >= 3:
             bom_sheet = xls.sheet_names[2]  # 第三个表（索引从0开始）
-        elif not bom_sheet and len(xls.sheet_names) > 0:
+        elif len(xls.sheet_names) > 0:
             # 如果没有第三个表，使用第一个表
             bom_sheet = xls.sheet_names[0]
         
@@ -83,6 +76,9 @@ def import_excel_to_db(file_stream, upload_batch, project_name):
             df[col] = None
 
     # 数据类型转换和清理
+    # 处理level列，确保它是整数类型
+    df["level"] = pd.to_numeric(df["level"], errors='coerce').fillna(0).astype(int)
+    
     # 处理unit_count_per_level列，保留原始值，但将NaN值填充为空字符串
     df["unit_count_per_level"] = df["unit_count_per_level"].fillna('').astype(str)
     
@@ -90,15 +86,16 @@ def import_excel_to_db(file_stream, upload_batch, project_name):
     df["unit_weight_kg"] = df["unit_weight_kg"].fillna('').astype(str)
     df["total_weight_kg"] = pd.to_numeric(df["total_weight_kg"], errors='coerce').fillna(0)
     
-    # 添加批次和项目名
+    # 添加批次、项目名和文件唯一ID
     df["upload_batch"] = upload_batch
     df["project_name"] = project_name
+    df["file_unique_id"] = file_unique_id
 
     conn = get_connection()
     cur = conn.cursor()
 
     # 确保列的顺序正确
-    columns_in_order = standard_columns + ["upload_batch", "project_name"]
+    columns_in_order = standard_columns + ["upload_batch", "project_name", "file_unique_id"]
     
     for _, row in df.iterrows():
         try:
@@ -107,8 +104,8 @@ def import_excel_to_db(file_stream, upload_batch, project_name):
                     level, part_code, part_name, spec,
                     version, material, unit_count_per_level, unit_weight_kg, total_weight_kg,
                     part_property, drawing_size, reference_number, purchase_status, process_route, remark,
-                    upload_batch, project_name
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    upload_batch, project_name, file_unique_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, tuple(row[col] for col in columns_in_order))
         except Exception as e:
             print(f"插入数据时出错: {e}")

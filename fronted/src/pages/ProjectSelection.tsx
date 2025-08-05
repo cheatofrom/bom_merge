@@ -1,28 +1,63 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getProjectNames, uploadPartsExcel, getProjectNote, saveProjectNote } from '../services/api';
+import { getProjectNames, getAllProjects, uploadPartsExcel, getProjectNote, saveProjectNote } from '../services/api';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { ProjectNote } from '../types';
+import { ProjectNote, Project } from '../types';
+
+/**
+ * @component ProjectSelection
+ * @description 项目选择页面组件，用于显示所有可用项目，允许用户选择项目进行合并查看，
+ * 上传Excel文件导入新项目，以及管理项目备注信息
+ */
 
 const ProjectSelection: React.FC = () => {
+  // 所有可用项目名称列表
   const [projectNames, setProjectNames] = useState<string[]>([]);
+  // 项目详细信息，包含文件ID
+  const [projectDetails, setProjectDetails] = useState<Record<string, Project>>({});
+  // 用户选中的项目列表
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+  // 页面加载状态
   const [loading, setLoading] = useState<boolean>(true);
+  // 错误信息
   const [error, setError] = useState<string | null>(null);
+  // 文件上传状态
   const [uploading, setUploading] = useState<boolean>(false);
-  const [uploadSuccess, setUploadSuccess] = useState<{status: string, rows: number} | null>(null);
+  // 上传结果状态，包含成功/失败信息和详情
+  const [uploadSuccess, setUploadSuccess] = useState<{status: string, rows: number, details?: {filename: string, project_name: string, file_id: string, status: string, rows_imported?: number, error?: string}[]} | null>(null);
+  // 文件上传输入框引用
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // 项目备注信息，键为项目名，值为备注内容
   const [projectNotes, setProjectNotes] = useState<Record<string, string>>({});
+  // 当前正在编辑的项目备注
   const [editingNote, setEditingNote] = useState<{project: string, note: string} | null>(null);
+  // 备注保存状态
   const [savingNote, setSavingNote] = useState<boolean>(false);
+  // 路由导航hook
   const navigate = useNavigate();
 
+  /**
+   * @effect 组件挂载时获取项目列表、项目详细信息和项目备注
+   * @description 在组件挂载后，从API获取所有可用项目名称、详细信息和对应的备注信息
+   */
   useEffect(() => {
-    const fetchProjectNames = async () => {
+    const fetchProjectData = async () => {
       try {
         setLoading(true);
+        // 获取所有项目名称
         const names = await getProjectNames();
         setProjectNames(names);
+        
+        // 获取所有项目详细信息
+        const projects = await getAllProjects();
+        const detailsObj: Record<string, Project> = {};
+        
+        // 将项目详细信息按项目名称组织成对象
+        projects.forEach(project => {
+          detailsObj[project.project_name] = project;
+        });
+        
+        setProjectDetails(detailsObj);
         setError(null);
         
         // 获取所有项目的备注
@@ -39,15 +74,20 @@ const ProjectSelection: React.FC = () => {
         setProjectNotes(notesObj);
       } catch (err) {
         setError('获取项目列表失败，请稍后重试');
-        console.error('Error fetching project names:', err);
+        console.error('Error fetching project data:', err);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchProjectNames();
+    fetchProjectData();
   }, []);
 
+  /**
+   * @function handleProjectToggle
+   * @description 切换项目选中状态，如果项目已选中则取消选中，否则添加到选中列表
+   * @param {string} projectName - 要切换状态的项目名称
+   */
   const handleProjectToggle = (projectName: string) => {
     setSelectedProjects(prev => {
       if (prev.includes(projectName)) {
@@ -58,49 +98,83 @@ const ProjectSelection: React.FC = () => {
     });
   };
 
+  /**
+   * @function handleMergeClick
+   * @description 处理合并按钮点击事件，将选中的项目列表作为参数导航到合并页面
+   * @throws {Error} 如果没有选中任何项目，显示错误信息
+   */
   const handleMergeClick = () => {
     if (selectedProjects.length === 0) {
       setError('请至少选择一个项目');
       return;
     }
     
+    // 将选中的项目列表序列化并编码为URL参数
     const projectsParam = encodeURIComponent(JSON.stringify(selectedProjects));
     navigate(`/merged-parts?projects=${projectsParam}`);
   };
 
+  /**
+   * @function handleUploadClick
+   * @description 处理上传按钮点击事件，触发隐藏的文件输入框点击
+   */
   const handleUploadClick = () => {
     if (fileInputRef.current) {
       fileInputRef.current.click();
     }
   };
 
+  /**
+   * @function handleFileChange
+   * @description 处理文件选择变更事件，上传Excel文件并导入项目数据
+   * @param {React.ChangeEvent<HTMLInputElement>} event - 文件输入框变更事件
+   */
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (!files || files.length === 0) return;
+    const fileList = event.target.files;
+    if (!fileList || fileList.length === 0) return;
 
-    const file = files[0];
-    if (!file.name.endsWith('.xlsx') && !file.name.endsWith('.xls')) {
-      setError('请上传Excel文件（.xlsx或.xls格式）');
+    // 转换FileList为数组
+    const filesArray = Array.from(fileList);
+    
+    // 验证所有文件格式，确保都是Excel文件
+    const invalidFiles = filesArray.filter(file => !file.name.endsWith('.xlsx') && !file.name.endsWith('.xls'));
+    if (invalidFiles.length > 0) {
+      setError(`请确保所有上传的文件都是Excel格式（.xlsx或.xls）。以下文件格式不正确：${invalidFiles.map(f => f.name).join(', ')}`);
       return;
     }
 
     try {
+      // 设置上传状态和清除之前的状态
       setUploading(true);
       setError(null);
       setUploadSuccess(null);
       
-      const result = await uploadPartsExcel(file);
+      // 调用API上传Excel文件
+      const result = await uploadPartsExcel(filesArray);
       
+      // 设置上传结果状态
       setUploadSuccess({
         status: result.status,
-        rows: result.rows_imported
+        rows: result.rows_imported,
+        details: result.details
       });
       
-      // 重新获取项目列表
+      // 上传成功后重新获取项目列表
       const names = await getProjectNames();
       setProjectNames(names);
       
-      // 获取新项目的备注
+      // 获取所有项目详细信息
+      const projects = await getAllProjects();
+      const detailsObj: Record<string, Project> = {...projectDetails};
+      
+      // 将项目详细信息按项目名称组织成对象
+      projects.forEach(project => {
+        detailsObj[project.project_name] = project;
+      });
+      
+      setProjectDetails(detailsObj);
+      
+      // 获取新项目的备注信息
       const notesObj = {...projectNotes};
       for (const name of names) {
         if (!notesObj[name]) {
@@ -126,7 +200,11 @@ const ProjectSelection: React.FC = () => {
     }
   };
   
-  // 开始编辑项目备注
+  /**
+   * @function handleEditNote
+   * @description 开始编辑指定项目的备注信息
+   * @param {string} projectName - 要编辑备注的项目名称
+   */
   const handleEditNote = (projectName: string) => {
     setEditingNote({
       project: projectName,
@@ -134,7 +212,11 @@ const ProjectSelection: React.FC = () => {
     });
   };
   
-  // 保存项目备注
+  /**
+   * @function handleSaveNote
+   * @description 保存当前正在编辑的项目备注
+   * @async
+   */
   const handleSaveNote = async () => {
     if (!editingNote) return;
     
@@ -142,8 +224,19 @@ const ProjectSelection: React.FC = () => {
       setSavingNote(true);
       setError(null);
       
+      // 查找上传成功的文件ID，如果是刚上传的项目，关联文件ID
+      let fileUniqueId = '';
+      if (uploadSuccess && uploadSuccess.details) {
+        const projectDetail = uploadSuccess.details.find(d => d.project_name === editingNote.project && d.status === 'success');
+        if (projectDetail) {
+          fileUniqueId = projectDetail.file_id;
+        }
+      }
+      
+      // 调用API保存项目备注
       const result = await saveProjectNote({
         project_name: editingNote.project,
+        file_unique_id: fileUniqueId,
         note: editingNote.note
       });
       
@@ -163,37 +256,62 @@ const ProjectSelection: React.FC = () => {
     }
   };
   
-  // 取消编辑备注
+  /**
+   * @function handleCancelEditNote
+   * @description 取消编辑项目备注，不保存更改
+   */
   const handleCancelEditNote = () => {
     setEditingNote(null);
   };
 
+  /**
+   * @returns {JSX.Element} 渲染项目选择页面的UI组件
+   */
   return (
     <div className="container mx-auto p-6 max-w-7xl">
+      {/* 页面标题和操作按钮区域 */}
       <div className="flex justify-between items-center mb-6">
         <div>
           <h1 className="text-3xl font-bold text-blue-700 mb-2">零部件库管理系统</h1>
           <h2 className="text-xl text-gray-600 border-b pb-2">选择项目进行合并查看</h2>
         </div>
-        <button
-          onClick={handleUploadClick}
-          disabled={uploading}
-          className={`px-6 py-3 rounded-lg shadow-md font-semibold text-lg flex items-center transition-all duration-200 ${uploading ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700 hover:shadow-lg'}`}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2" viewBox="0 0 20 20" fill="currentColor">
-            <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-          </svg>
-          {uploading ? '上传中...' : '上传Excel文件'}
-        </button>
+        {/* 操作按钮区域：合并项目和上传Excel文件 */}
+        <div className="flex items-center space-x-4">
+          {/* 合并选中项目按钮 */}
+          <button
+            onClick={handleMergeClick}
+            disabled={selectedProjects.length === 0}
+            className={`px-6 py-3 rounded-lg shadow-md font-medium text-lg flex items-center transition-all duration-200 ${selectedProjects.length === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg'}`}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+            合并选中项目
+          </button>
+          {/* 上传Excel文件按钮 */}
+          <button
+            onClick={handleUploadClick}
+            disabled={uploading}
+            className={`px-6 py-3 rounded-lg shadow-md font-semibold text-lg flex items-center transition-all duration-200 ${uploading ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700 hover:shadow-lg'}`}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2" viewBox="0 0 20 20" fill="currentColor">
+              <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
+            </svg>
+            {uploading ? '上传中...' : '上传Excel文件（可多选）'}
+          </button>
+        </div>
+        {/* 隐藏的文件上传输入框，通过按钮触发点击 */}
         <input
           type="file"
           ref={fileInputRef}
           onChange={handleFileChange}
           accept=".xlsx,.xls"
           className="hidden"
+          multiple
         />
       </div>
       
+      {/* 错误提示区域，仅在有错误时显示 */}
       {error && (
         <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded-md shadow-md mb-6 flex items-center">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -203,16 +321,54 @@ const ProjectSelection: React.FC = () => {
         </div>
       )}
       
+      {/* 上传结果提示区域，仅在上传完成后显示 */}
       {uploadSuccess && (
-        <div className="bg-green-50 border-l-4 border-green-500 text-green-700 p-4 rounded-md shadow-md mb-6 flex items-center">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-          </svg>
-          <span className="font-medium">Excel文件上传成功！已导入 {uploadSuccess.rows} 条数据。</span>
+        <div className={`p-4 rounded-md shadow-md mb-6 border-l-4 ${uploadSuccess.status === 'success' ? 'bg-green-50 border-green-500 text-green-700' : uploadSuccess.status === 'partial_success' ? 'bg-yellow-50 border-yellow-500 text-yellow-700' : 'bg-red-50 border-red-500 text-red-700'}`}>
+          {/* 上传状态图标和文字提示 */}
+          <div className="flex items-center">
+            {uploadSuccess.status === 'success' ? (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+              </svg>
+            ) : uploadSuccess.status === 'partial_success' ? (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            ) : (
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            )}
+            <span className="font-medium">
+              {uploadSuccess.status === 'success' ? 'Excel文件上传成功！' : 
+               uploadSuccess.status === 'partial_success' ? '部分Excel文件上传成功！' : 
+               'Excel文件上传失败！'}
+              {uploadSuccess.status !== 'error' && `已导入 ${uploadSuccess.rows} 条数据。`}
+            </span>
+          </div>
+          
+          {/* 上传详细信息列表，显示每个文件的上传结果 */}
+          {uploadSuccess.details && uploadSuccess.details.length > 0 && (
+            <div className="mt-3 ml-9">
+              <p className="font-medium mb-1">详细信息：</p>
+              <ul className="list-disc list-inside space-y-1">
+                {uploadSuccess.details.map((detail, index) => (
+                  <li key={index} className={detail.status === 'success' ? 'text-green-600' : 'text-red-600'}>
+                    {detail.filename} ({detail.project_name}): 
+                    {detail.status === 'success' 
+                      ? `成功导入 ${detail.rows_imported} 条记录，文件ID: ${detail.file_id.substring(0, 8)}...` 
+                      : `导入失败 - ${detail.error}`}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
       
+      {/* 加载状态显示或项目列表内容 */}
       {loading || uploading ? (
+        /* 加载中状态显示加载动画 */
         <div className="flex justify-center items-center py-12">
           <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
           <span className="ml-3 text-lg text-gray-600">{uploading ? '上传Excel文件中...' : '加载项目中...'}</span>
@@ -220,7 +376,9 @@ const ProjectSelection: React.FC = () => {
       ) : (
         <div>
           <div className="mb-4">
+            {/* 根据是否有项目显示不同内容 */}
             {projectNames.length === 0 ? (
+              /* 无项目时显示空状态提示 */
               <div className="flex flex-col items-center justify-center py-16 bg-gray-50 rounded-lg border border-gray-200">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -238,25 +396,36 @@ const ProjectSelection: React.FC = () => {
                 </button>
               </div>
             ) : (
+              /* 有项目时显示项目卡片网格 */
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {/* 遍历所有项目名称，为每个项目创建卡片 */}
                 {projectNames.map(name => (
                   <div 
                     key={name}
                     className={`border p-5 rounded-lg shadow-md transition-all duration-200 hover:shadow-lg ${selectedProjects.includes(name) ? 'bg-blue-50 border-blue-500' : 'hover:border-gray-300'}`}
                   >
-                    <div className="flex items-center cursor-pointer" onClick={() => handleProjectToggle(name)}>
-                      <div className={`w-5 h-5 rounded mr-3 flex items-center justify-center border ${selectedProjects.includes(name) ? 'bg-blue-500 border-blue-500' : 'border-gray-400'}`}>
-                        {selectedProjects.includes(name) && (
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                          </svg>
-                        )}
+                    <div className="cursor-pointer" onClick={() => handleProjectToggle(name)}>
+                      <div className="flex items-center">
+                        <div className={`w-5 h-5 rounded mr-3 flex items-center justify-center border ${selectedProjects.includes(name) ? 'bg-blue-500 border-blue-500' : 'border-gray-400'}`}>
+                          {selectedProjects.includes(name) && (
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
+                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                            </svg>
+                          )}
+                        </div>
+                        <span className="text-lg font-medium">{name}</span>
                       </div>
-                      <span className="text-lg font-medium">{name}</span>
+                      {/* 文件ID显示 */}
+                      {projectDetails[name] && projectDetails[name].file_unique_id && (
+                        <div className="ml-8 mt-1 text-xs text-gray-500">
+                          文件ID: {projectDetails[name].file_unique_id.substring(0, 8)}...
+                        </div>
+                      )}
                     </div>
                     
-                    {/* 项目备注区域 */}
+                    {/* 项目备注区域 - 显示或编辑项目备注 */}
                     <div className="mt-3 pt-3 border-t border-gray-200">
+                      {/* 编辑模式 - 当前项目正在编辑备注时显示 */}
                       {editingNote && editingNote.project === name ? (
                         <div>
                           <textarea
@@ -293,6 +462,7 @@ const ProjectSelection: React.FC = () => {
                           </div>
                         </div>
                       ) : (
+                        /* 查看模式 - 显示备注内容或添加备注提示 */
                         <div 
                           className="min-h-[40px] text-sm text-gray-600 hover:bg-gray-50 p-2 rounded-md cursor-pointer flex items-start"
                           onClick={(e) => {
@@ -327,22 +497,14 @@ const ProjectSelection: React.FC = () => {
             )}
           </div>
           
-          <div className="flex justify-center mt-8">
-            <button
-              onClick={handleMergeClick}
-              disabled={selectedProjects.length === 0}
-              className={`px-6 py-3 rounded-lg shadow-md font-medium text-lg flex items-center transition-all duration-200 ${selectedProjects.length === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg'}`}
-            >
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
-              </svg>
-              合并选中项目
-            </button>
-          </div>
+          {/* 合并按钮已移至页面顶部 */}
         </div>
       )}
     </div>
   );
 };
 
+/**
+ * 导出项目选择组件作为默认导出
+ */
 export default ProjectSelection;

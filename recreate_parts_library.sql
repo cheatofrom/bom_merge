@@ -1,3 +1,4 @@
+-- 重新创建parts_library表
 CREATE TABLE parts_library (
     id SERIAL PRIMARY KEY,                -- 主键ID
     level TEXT,                          -- 层级

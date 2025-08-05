@@ -23,23 +23,55 @@ app.add_middleware(
 app.include_router(project_notes_router, tags=["project_notes"])
 
 
+import uuid
+
 @app.post("/upload_parts_excel")
 async def upload_parts_excel(
-    file: UploadFile = File(...),
+    files: list[UploadFile] = File(...),
     project_name: str = Query(default=None)
 ):
-    # 如果 project_name 为空，则用文件名（去扩展名）作为默认值
-    if not project_name:
-        filename = file.filename  # 例如 s500.xlsx
-        project_name = os.path.splitext(filename)[0]  # 结果 s500
+    total_count = 0
+    results = []
+    
+    for file in files:
+        # 如果 project_name 为空，则用文件名（去扩展名）作为默认值
+        current_project_name = project_name
+        if not current_project_name:
+            filename = file.filename  # 例如 s500.xlsx
+            current_project_name = os.path.splitext(filename)[0]  # 结果 s500
 
-    upload_batch = f"batch_{project_name}_001"
-    try:
-        count = import_excel_to_db(file.file, upload_batch, project_name)
-        return {"status": "success", "rows_imported": count}
-    except Exception as e:
-        error_detail = f"导入错误: {str(e)}\n详细信息: {traceback.format_exc()}"
-        return JSONResponse(status_code=500, content={"error": str(e), "detail": error_detail})
+        # 为每个文件生成唯一ID
+        file_unique_id = str(uuid.uuid4())
+        
+        # 使用唯一ID作为上传批次的一部分
+        upload_batch = f"batch_{current_project_name}_{file_unique_id[:8]}"
+        try:
+            count = import_excel_to_db(file.file, upload_batch, current_project_name, file_unique_id)
+            total_count += count
+            results.append({
+                "filename": file.filename,
+                "project_name": current_project_name,
+                "file_id": file_unique_id,
+                "status": "success",
+                "rows_imported": count
+            })
+        except Exception as e:
+            error_detail = f"导入错误: {str(e)}\n详细信息: {traceback.format_exc()}"
+            results.append({
+                "filename": file.filename,
+                "project_name": current_project_name,
+                "file_id": file_unique_id,
+                "status": "error",
+                "error": str(e),
+                "detail": error_detail
+            })
+    
+    if all(result["status"] == "success" for result in results):
+        return {"status": "success", "rows_imported": total_count, "details": results}
+    elif any(result["status"] == "success" for result in results):
+        return {"status": "partial_success", "rows_imported": total_count, "details": results}
+    else:
+        return JSONResponse(status_code=500, content={"status": "error", "details": results})
 
 
 @app.get("/projects")
@@ -48,14 +80,14 @@ def get_all_projects():
         conn = get_connection()
         cur = conn.cursor()
         cur.execute("""
-            SELECT DISTINCT project_name, upload_batch, created_at
+            SELECT DISTINCT project_name, upload_batch, file_unique_id, created_at
             FROM parts_library
             ORDER BY created_at DESC
         """)
         rows = cur.fetchall()
         cur.close()
         conn.close()
-        return [{"project_name": r[0], "upload_batch": r[1]} for r in rows]
+        return [{"project_name": r[0], "upload_batch": r[1], "file_unique_id": r[2]} for r in rows]
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"查询项目时出错: {str(e)}"})
 
@@ -105,7 +137,16 @@ def get_all_parts(project_name: str = None):
         # 转换为字典列表
         result = []
         for row in rows:
-            result.append(dict(zip(columns, row)))
+            part_dict = dict(zip(columns, row))
+            # 确保level字段是整数类型
+            if 'level' in part_dict and part_dict['level'] is not None:
+                try:
+                    part_dict['level'] = int(part_dict['level'])
+                except (ValueError, TypeError):
+                    part_dict['level'] = 0
+            else:
+                part_dict['level'] = 0
+            result.append(part_dict)
             
         return result
     except Exception as e:
@@ -114,10 +155,31 @@ def get_all_parts(project_name: str = None):
 
 # 添加合并多个项目的零部件API
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 class MergeRequest(BaseModel):
     project_names: List[str]
+    
+class PartUpdate(BaseModel):
+    id: int
+    level: Optional[int] = None
+    part_code: Optional[str] = None
+    part_name: Optional[str] = None
+    spec: Optional[str] = None
+    version: Optional[str] = None
+    material: Optional[str] = None
+    unit_count_per_level: Optional[str] = None
+    unit_weight_kg: Optional[str] = None
+    total_weight_kg: Optional[float] = None
+    part_property: Optional[str] = None
+    drawing_size: Optional[str] = None
+    reference_number: Optional[str] = None
+    purchase_status: Optional[str] = None
+    process_route: Optional[str] = None
+    remark: Optional[str] = None
+
+class UpdatePartsRequest(BaseModel):
+    parts: List[PartUpdate]
 
 @app.post("/merge_parts")
 def merge_parts(req: MergeRequest):
@@ -141,10 +203,66 @@ def merge_parts(req: MergeRequest):
         cur.close()
         conn.close()
 
-        return [dict(zip(columns, row)) for row in rows]
+        result = []
+        for row in rows:
+            part_dict = dict(zip(columns, row))
+            # 确保level字段是整数类型
+            if 'level' in part_dict and part_dict['level'] is not None:
+                try:
+                    part_dict['level'] = int(part_dict['level'])
+                except (ValueError, TypeError):
+                    part_dict['level'] = 0
+            else:
+                part_dict['level'] = 0
+            result.append(part_dict)
+        
+        return result
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"合并零部件时出错: {str(e)}"})
 
+
+
+@app.post("/update_parts")
+def update_parts(req: UpdatePartsRequest):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        updated_count = 0
+        
+        for part in req.parts:
+            # 构建更新语句
+            update_fields = []
+            update_values = []
+            
+            # 动态构建更新字段和值
+            for field, value in part.dict(exclude={'id'}).items():
+                if value is not None:  # 只更新非空字段
+                    update_fields.append(f"{field} = %s")
+                    update_values.append(value)
+            
+            if not update_fields:  # 如果没有要更新的字段，跳过
+                continue
+                
+            # 添加ID作为WHERE条件的值
+            update_values.append(part.id)
+            
+            # 构建并执行SQL语句
+            sql = f"""
+                UPDATE parts_library 
+                SET {', '.join(update_fields)}
+                WHERE id = %s
+            """
+            cur.execute(sql, update_values)
+            updated_count += cur.rowcount
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {"status": "success", "updated_count": updated_count}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"更新零部件失败: {str(e)}"})
 
 
 if __name__ == "__main__":
