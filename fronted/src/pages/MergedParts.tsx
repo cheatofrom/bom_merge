@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useMemo } from 'react'; 
 import { useLocation, useNavigate } from 'react-router-dom'; 
-import { mergeParts, updateParts } from '../services/api';
+import { mergeParts, mergePartsByFileIds, updateParts, saveMergedProject } from '../services/api';
 import { Part } from '../types';
+import ConfirmDialog from '../components/ConfirmDialog';
 
 // 定义冲突零件类型
 interface ConflictInfo {
@@ -29,27 +30,46 @@ const MergedParts: React.FC = () => {
   const [saving, setSaving] = useState<boolean>(false);
   // 保存结果消息
   const [saveMessage, setSaveMessage] = useState<{type: 'success' | 'error', text: string} | null>(null);
+  // 保存合并项目状态
+  const [savingMergedProject, setSavingMergedProject] = useState<boolean>(false);
+  // 保存合并项目名称
+  const [mergedProjectName, setMergedProjectName] = useState<string>('');
+  // 显示保存合并项目对话框
+  const [showSaveDialog, setShowSaveDialog] = useState<boolean>(false);
   const location = useLocation();
   const navigate = useNavigate();
 
+  // 存储源文件ID列表
+  const [sourceFileIds, setSourceFileIds] = useState<string[]>([]);
+  
   useEffect(() => {
     const fetchMergedParts = async () => {
       try {
         setLoading(true);
         const searchParams = new URLSearchParams(location.search);
         const projectsParam = searchParams.get('projects');
+        const fileIdsParam = searchParams.get('fileIds');
 
-        if (!projectsParam) {
-          setError('未指定项目名称');
+        if (!projectsParam || !fileIdsParam) {
+          setError('未指定项目名称或文件ID');
           setParts([]);
           setProjectNames([]);
           return;
         }
 
         const selectedProjects = JSON.parse(decodeURIComponent(projectsParam)) as string[];
+        const selectedFileIds = JSON.parse(decodeURIComponent(fileIdsParam)) as string[];
         setProjectNames(selectedProjects);
+        setSourceFileIds(selectedFileIds);
 
-        const mergedParts = await mergeParts(selectedProjects);
+        // 优先使用文件ID进行合并，如果失败则回退到使用项目名称
+        let mergedParts;
+        try {
+          mergedParts = await mergePartsByFileIds(selectedFileIds);
+        } catch (error) {
+          console.error('通过文件ID合并失败，尝试使用项目名称合并:', error);
+          mergedParts = await mergeParts(selectedProjects);
+        }
         setParts(mergedParts);
         
         // 检测零件号相同但其他字段不一致的情况
@@ -304,8 +324,78 @@ const MergedParts: React.FC = () => {
     setConflictParts(conflicts);
   };
 
+  // 处理保存合并项目
+  const handleSaveMergedProject = async () => {
+    if (!mergedProjectName.trim()) {
+      setSaveMessage({
+        type: 'error',
+        text: '请输入合并项目名称'
+      });
+      return;
+    }
+
+    try {
+      setSavingMergedProject(true);
+      setSaveMessage(null);
+      
+      const result = await saveMergedProject(mergedProjectName, projectNames, parts, sourceFileIds);
+      
+      if (result.status === 'success') {
+        setSaveMessage({
+          type: 'success',
+          text: `成功保存合并项目 "${mergedProjectName}", 项目ID: ${result.merged_project_id}`
+        });
+        // 关闭对话框
+        setShowSaveDialog(false);
+        // 清空项目名称
+        setMergedProjectName('');
+      } else {
+        setSaveMessage({
+          type: 'error',
+          text: result.message || '保存合并项目失败'
+        });
+      }
+    } catch (err: unknown) {
+      console.error('保存合并项目失败:', err);
+      setSaveMessage({
+        type: 'error',
+        text: (err as Error)?.message || '保存合并项目失败，请稍后重试'
+      });
+    } finally {
+      setSavingMergedProject(false);
+    }
+  };
+
   return (
     <div className="w-full min-h-screen bg-gray-50 px-4 sm:px-6 lg:px-8 py-6">
+      {/* 保存合并项目对话框 */}
+      <ConfirmDialog
+        isOpen={showSaveDialog}
+        title="保存为合并项目"
+        message={
+          <div className="mt-2">
+            <p className="text-sm text-gray-500 mb-4">
+              请输入合并项目名称，系统将保存当前合并结果为新的合并项目。
+            </p>
+            <div className="mt-2">
+              <input
+                type="text"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                placeholder="请输入合并项目名称"
+                value={mergedProjectName}
+                onChange={(e) => setMergedProjectName(e.target.value)}
+              />
+            </div>
+          </div>
+        }
+        confirmText={savingMergedProject ? "保存中..." : "保存"}
+        cancelText="取消"
+        onConfirm={handleSaveMergedProject}
+        onCancel={() => {
+          setShowSaveDialog(false);
+          setMergedProjectName('');
+        }}
+      />
       
       {/* 取消最大宽度限制，父容器铺满全屏 */}
       <div className="mx-0">
@@ -354,6 +444,34 @@ const MergedParts: React.FC = () => {
                 )}
               </button>
             )}
+            
+            {/* 保存为合并项目按钮 */}
+            <button
+              onClick={() => setShowSaveDialog(true)}
+              disabled={parts.length === 0 || savingMergedProject}
+              className={`px-5 py-2 rounded-lg transition-colors duration-200 shadow-md flex items-center whitespace-nowrap ${
+                parts.length === 0 || savingMergedProject
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                  : 'bg-purple-600 hover:bg-purple-700 text-white'
+              }`}
+            >
+              {savingMergedProject ? (
+                <>
+                  <svg className="animate-spin -ml-1 mr-2 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  保存中...
+                </>
+              ) : (
+                <>
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                    <path d="M7.707 10.293a1 1 0 10-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L11 11.586V6h5a2 2 0 012 2v7a2 2 0 01-2 2H4a2 2 0 01-2-2V8a2 2 0 012-2h5v5.586l-1.293-1.293zM9 4a1 1 0 012 0v2H9V4z" />
+                  </svg>
+                  保存为合并项目
+                </>
+              )}
+            </button>
             
             {/* 返回按钮 */}
             <button

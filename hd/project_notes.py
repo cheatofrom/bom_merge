@@ -15,8 +15,8 @@ class ProjectNoteResponse(BaseModel):
     project_name: str
     file_unique_id: Optional[str] = None
     note: Optional[str] = None
-    created_at: str
-    updated_at: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 @router.get("/project_notes", response_model=List[ProjectNoteResponse])
 async def get_project_notes():
@@ -45,11 +45,46 @@ async def get_project_notes():
             })
         return result
     except Exception as e:
+        # 记录详细的错误信息
+        import traceback
+        error_detail = f"获取项目备注失败: {str(e)}\n详细信息: {traceback.format_exc()}"
+        print(error_detail)
         raise HTTPException(status_code=500, detail=f"获取项目备注失败: {str(e)}")
 
 @router.get("/project_notes/{project_name}", response_model=ProjectNoteResponse)
 async def get_project_note(project_name: str):
-    """获取指定项目的备注"""
+    """获取指定项目的备注（路径参数）"""
+    try:
+        # 记录请求的项目名称，用于调试
+        print(f"路径参数请求的项目名称: {project_name}")
+        
+        # 使用通用函数获取项目备注
+        return await get_project_note_internal(project_name)
+    except Exception as e:
+        # 记录详细的错误信息
+        import traceback
+        error_detail = f"获取项目备注失败: {str(e)}\n详细信息: {traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"获取项目备注失败: {str(e)}")
+
+@router.get("/project_notes/by_name", response_model=ProjectNoteResponse)
+async def get_project_note_by_name(project_name: str):
+    """通过查询参数获取指定项目的备注"""
+    try:
+        # 记录请求的项目名称，用于调试
+        print(f"查询参数请求的项目名称: {project_name}")
+        
+        # 使用通用函数获取项目备注
+        return await get_project_note_internal(project_name)
+    except Exception as e:
+        # 记录详细的错误信息
+        import traceback
+        error_detail = f"获取项目备注失败: {str(e)}\n详细信息: {traceback.format_exc()}"
+        print(error_detail)
+        raise HTTPException(status_code=500, detail=f"获取项目备注失败: {str(e)}")
+
+async def get_project_note_internal(project_name: str):
+    """内部函数：获取指定项目的备注"""
     try:
         conn = get_connection()
         cur = conn.cursor()
@@ -65,15 +100,23 @@ async def get_project_note(project_name: str):
         if not row:
             return {"id": 0, "project_name": project_name, "file_unique_id": None, "note": "", "created_at": None, "updated_at": None}
         
+        # 确保日期时间字段正确处理
+        created_at = row[4].isoformat() if row[4] else None
+        updated_at = row[5].isoformat() if row[5] else None
+        
         return {
             "id": row[0],
             "project_name": row[1],
             "file_unique_id": row[2],
             "note": row[3],
-            "created_at": row[4].isoformat() if row[4] else None,
-            "updated_at": row[5].isoformat() if row[5] else None
+            "created_at": created_at,
+            "updated_at": updated_at
         }
     except Exception as e:
+        # 记录详细的错误信息
+        import traceback
+        error_detail = f"获取项目备注内部函数失败: {str(e)}\n详细信息: {traceback.format_exc()}"
+        print(error_detail)
         raise HTTPException(status_code=500, detail=f"获取项目备注失败: {str(e)}")
 
 @router.post("/project_notes", response_model=ProjectNoteResponse)
@@ -132,4 +175,8 @@ async def create_or_update_project_note(note: ProjectNote):
             "updated_at": row[5].isoformat() if row[5] else None
         }
     except Exception as e:
+        # 记录详细的错误信息
+        import traceback
+        error_detail = f"保存项目备注失败: {str(e)}\n详细信息: {traceback.format_exc()}"
+        print(error_detail)
         raise HTTPException(status_code=500, detail=f"保存项目备注失败: {str(e)}")

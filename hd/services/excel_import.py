@@ -3,6 +3,7 @@ from db import get_connection
 import numpy as np
 import tempfile
 import os
+from services.mapping_service import create_file_mapping
 
 def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=None):
     # 创建一个临时文件来解决SpooledTemporaryFile的兼容性问题
@@ -115,4 +116,41 @@ def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=N
     conn.commit()
     cur.close()
     conn.close()
+    
+    # 创建文件与项目的映射关系
+    if file_unique_id:
+        try:
+            # 创建文件与项目的映射
+            create_file_mapping(
+                file_unique_id=file_unique_id,
+                entity_type='project',
+                entity_id=project_name,
+                mapping_type='excel_import',
+                mapping_data={
+                    'upload_batch': upload_batch,
+                    'rows_count': len(df),
+                    'sheet_name': bom_sheet
+                }
+            )
+            
+            # 为每个零件创建映射（可选，根据需要决定是否需要这么详细的映射）
+            # 这里只为有零件号的行创建映射
+            for _, row in df.iterrows():
+                if row['part_code'] and str(row['part_code']).strip():
+                    create_file_mapping(
+                        file_unique_id=file_unique_id,
+                        entity_type='part',
+                        entity_id=str(row['part_code']),
+                        mapping_type='part_in_excel',
+                        mapping_data={
+                            'part_name': row['part_name'],
+                            'level': int(row['level']),
+                            'project_name': project_name
+                        }
+                    )
+        except Exception as e:
+            print(f"创建文件映射时出错: {e}")
+            # 这里我们不抛出异常，因为映射创建失败不应该影响主要的导入流程
+            # 但我们记录错误以便调试
+    
     return len(df)

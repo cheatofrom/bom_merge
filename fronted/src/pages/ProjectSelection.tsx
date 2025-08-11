@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getProjectNames, getAllProjects, uploadPartsExcel, getProjectNote, saveProjectNote } from '../services/api';
+import { getProjectNames, getAllProjects, uploadPartsExcel, getProjectNote, saveProjectNote, deleteProject, getUploadedFiles } from '../services/api';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { ProjectNote, Project } from '../types';
+import { ProjectNote, Project, UploadedFile, FileMapping } from '../types';
+import ConfirmDialog from '../components/ConfirmDialog';
+import FileMappingInfo from '../components/FileMappingInfo';
 
 /**
  * @component ProjectSelection
@@ -15,8 +17,10 @@ const ProjectSelection: React.FC = () => {
   const [projectNames, setProjectNames] = useState<string[]>([]);
   // 项目详细信息，包含文件ID
   const [projectDetails, setProjectDetails] = useState<Record<string, Project>>({});
-  // 用户选中的项目列表
+  // 用户选中的项目列表（项目名称）
   const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
+  // 用户选中的项目文件ID列表
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   // 页面加载状态
   const [loading, setLoading] = useState<boolean>(true);
   // 错误信息
@@ -33,6 +37,18 @@ const ProjectSelection: React.FC = () => {
   const [editingNote, setEditingNote] = useState<{project: string, note: string} | null>(null);
   // 备注保存状态
   const [savingNote, setSavingNote] = useState<boolean>(false);
+  // 删除项目状态
+  const [deleting, setDeleting] = useState<boolean>(false);
+  // 确认删除对话框状态
+  const [confirmDelete, setConfirmDelete] = useState<{isOpen: boolean, projectName: string}>({isOpen: false, projectName: ''});
+  // 上传文件列表
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  // 上传文件加载状态
+  const [loadingFiles, setLoadingFiles] = useState<boolean>(false);
+  // 当前选中查看的文件ID
+  const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
+  // 文件映射信息显示状态
+  const [showFileMappings, setShowFileMappings] = useState<boolean>(false);
   // 路由导航hook
   const navigate = useNavigate();
 
@@ -72,6 +88,17 @@ const ProjectSelection: React.FC = () => {
           }
         }
         setProjectNotes(notesObj);
+        
+        // 获取上传文件列表
+        try {
+          setLoadingFiles(true);
+          const files = await getUploadedFiles();
+          setUploadedFiles(files);
+        } catch (err) {
+          console.error('获取上传文件列表失败:', err);
+        } finally {
+          setLoadingFiles(false);
+        }
       } catch (err) {
         setError('获取项目列表失败，请稍后重试');
         console.error('Error fetching project data:', err);
@@ -86,9 +113,11 @@ const ProjectSelection: React.FC = () => {
   /**
    * @function handleProjectToggle
    * @description 切换项目选中状态，如果项目已选中则取消选中，否则添加到选中列表
+   * 同时更新选中的项目名称列表和文件ID列表
    * @param {string} projectName - 要切换状态的项目名称
    */
   const handleProjectToggle = (projectName: string) => {
+    // 更新选中的项目名称列表
     setSelectedProjects(prev => {
       if (prev.includes(projectName)) {
         return prev.filter(name => name !== projectName);
@@ -96,22 +125,35 @@ const ProjectSelection: React.FC = () => {
         return [...prev, projectName];
       }
     });
+    
+    // 同时更新选中的文件ID列表
+    setSelectedFileIds(prev => {
+      const fileId = projectDetails[projectName]?.file_unique_id || '';
+      if (!fileId) return prev; // 如果没有文件ID，不更新
+      
+      if (prev.includes(fileId)) {
+        return prev.filter(id => id !== fileId);
+      } else {
+        return [...prev, fileId];
+      }
+    });
   };
 
   /**
    * @function handleMergeClick
-   * @description 处理合并按钮点击事件，将选中的项目列表作为参数导航到合并页面
+   * @description 处理合并按钮点击事件，将选中的项目列表和文件ID列表作为参数导航到合并页面
    * @throws {Error} 如果没有选中任何项目，显示错误信息
    */
   const handleMergeClick = () => {
-    if (selectedProjects.length === 0) {
+    if (selectedProjects.length === 0 || selectedFileIds.length === 0) {
       setError('请至少选择一个项目');
       return;
     }
     
-    // 将选中的项目列表序列化并编码为URL参数
+    // 将选中的项目列表和文件ID列表序列化并编码为URL参数
     const projectsParam = encodeURIComponent(JSON.stringify(selectedProjects));
-    navigate(`/merged-parts?projects=${projectsParam}`);
+    const fileIdsParam = encodeURIComponent(JSON.stringify(selectedFileIds));
+    navigate(`/merged-parts?projects=${projectsParam}&fileIds=${fileIdsParam}`);
   };
 
   /**
@@ -188,6 +230,14 @@ const ProjectSelection: React.FC = () => {
         }
       }
       setProjectNotes(notesObj);
+      
+      // 获取最新的上传文件列表
+      try {
+        const files = await getUploadedFiles();
+        setUploadedFiles(files);
+      } catch (err) {
+        console.error('获取上传文件列表失败:', err);
+      }
     } catch (err) {
       console.error('上传Excel文件失败:', err);
       setError('上传Excel文件失败，请稍后重试');
@@ -257,6 +307,72 @@ const ProjectSelection: React.FC = () => {
   };
   
   /**
+   * @function handleShowDeleteConfirm
+   * @description 显示删除确认对话框
+   * @param {string} projectName - 要删除的项目名称
+   * @param {React.MouseEvent} e - 点击事件对象
+   */
+  const handleShowDeleteConfirm = (projectName: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // 阻止事件冒泡，避免触发项目选择
+    setConfirmDelete({isOpen: true, projectName});
+  };
+
+  /**
+   * @function handleCancelDelete
+   * @description 取消删除操作
+   */
+  const handleCancelDelete = () => {
+    setConfirmDelete({isOpen: false, projectName: ''});
+  };
+
+  /**
+   * @function handleConfirmDelete
+   * @description 确认删除项目
+   * @async
+   */
+  const handleConfirmDelete = async () => {
+    try {
+      setDeleting(true);
+      await deleteProject(confirmDelete.projectName);
+      
+      // 更新项目列表
+      setProjectNames(prev => prev.filter(name => name !== confirmDelete.projectName));
+      
+      // 如果该项目在已选择列表中，也需要移除
+      setSelectedProjects(prev => prev.filter(name => name !== confirmDelete.projectName));
+      
+      // 关闭确认对话框
+      setConfirmDelete({isOpen: false, projectName: ''});
+    } catch (err) {
+      console.error('删除项目失败:', err);
+      setError('删除项目失败，请重试');
+    } finally {
+      setDeleting(false);
+    }
+  };
+  
+  /**
+   * @function handleViewFileMappings
+   * @description 处理查看文件映射信息的操作，设置选中的文件ID并显示映射信息
+   * @param {string} fileUniqueId - 要查看映射的文件唯一ID
+   * @param {React.MouseEvent} e - 点击事件对象，用于阻止事件冒泡
+   */
+  const handleViewFileMappings = (fileUniqueId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // 阻止事件冒泡，避免触发项目选择
+    setSelectedFileId(fileUniqueId);
+    setShowFileMappings(true);
+  };
+  
+  /**
+   * @function handleCloseFileMappings
+   * @description 关闭文件映射信息显示
+   */
+  const handleCloseFileMappings = () => {
+    setShowFileMappings(false);
+    setSelectedFileId(null);
+  };
+  
+  /**
    * @function handleCancelEditNote
    * @description 取消编辑项目备注，不保存更改
    */
@@ -287,6 +403,16 @@ const ProjectSelection: React.FC = () => {
               <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
             </svg>
             合并选中项目
+          </button>
+          {/* 查看已保存的合并项目按钮 */}
+          <button
+            onClick={() => navigate('/merged-projects')}
+            className="px-6 py-3 rounded-lg shadow-md font-medium text-lg flex items-center transition-all duration-200 bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+              <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
+            </svg>
+            已保存的合并项目
           </button>
           {/* 上传Excel文件按钮 */}
           <button
@@ -323,14 +449,14 @@ const ProjectSelection: React.FC = () => {
       
       {/* 上传结果提示区域，仅在上传完成后显示 */}
       {uploadSuccess && (
-        <div className={`p-4 rounded-md shadow-md mb-6 border-l-4 ${uploadSuccess.status === 'success' ? 'bg-green-50 border-green-500 text-green-700' : uploadSuccess.status === 'partial_success' ? 'bg-yellow-50 border-yellow-500 text-yellow-700' : 'bg-red-50 border-red-500 text-red-700'}`}>
+        <div className={`p-4 rounded-md shadow-md mb-6 border-l-4 ${uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? 'bg-green-50 border-green-500 text-green-700' : uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? 'bg-yellow-50 border-yellow-500 text-yellow-700' : 'bg-red-50 border-red-500 text-red-700'}`}>
           {/* 上传状态图标和文字提示 */}
           <div className="flex items-center">
-            {uploadSuccess.status === 'success' ? (
+            {uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? (
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
-            ) : uploadSuccess.status === 'partial_success' ? (
+            ) : uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? (
               <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
               </svg>
@@ -340,10 +466,10 @@ const ProjectSelection: React.FC = () => {
               </svg>
             )}
             <span className="font-medium">
-              {uploadSuccess.status === 'success' ? 'Excel文件上传成功！' : 
-               uploadSuccess.status === 'partial_success' ? '部分Excel文件上传成功！' : 
+              {uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? 'Excel文件上传成功！' : 
+               uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? '部分Excel文件上传成功！' : 
                'Excel文件上传失败！'}
-              {uploadSuccess.status !== 'error' && `已导入 ${uploadSuccess.rows} 条数据。`}
+              {(uploadSuccess.status !== 'error' && uploadSuccess.status !== 'failed') && `已导入 ${uploadSuccess.rows} 条数据。`}
             </span>
           </div>
           
@@ -353,11 +479,11 @@ const ProjectSelection: React.FC = () => {
               <p className="font-medium mb-1">详细信息：</p>
               <ul className="list-disc list-inside space-y-1">
                 {uploadSuccess.details.map((detail, index) => (
-                  <li key={index} className={detail.status === 'success' ? 'text-green-600' : 'text-red-600'}>
+                  <li key={index} className={detail.status === 'imported' ? 'text-green-600' : 'text-red-600'}>
                     {detail.filename} ({detail.project_name}): 
-                    {detail.status === 'success' 
+                    {detail.status === 'imported' 
                       ? `成功导入 ${detail.rows_imported} 条记录，文件ID: ${detail.file_id.substring(0, 8)}...` 
-                      : `导入失败 - ${detail.error}`}
+                      : `导入失败 - ${detail.error || '未知错误'}`}
                   </li>
                 ))}
               </ul>
@@ -405,20 +531,47 @@ const ProjectSelection: React.FC = () => {
                     className={`border p-5 rounded-lg shadow-md transition-all duration-200 hover:shadow-lg ${selectedProjects.includes(name) ? 'bg-blue-50 border-blue-500' : 'hover:border-gray-300'}`}
                   >
                     <div className="cursor-pointer" onClick={() => handleProjectToggle(name)}>
-                      <div className="flex items-center">
-                        <div className={`w-5 h-5 rounded mr-3 flex items-center justify-center border ${selectedProjects.includes(name) ? 'bg-blue-500 border-blue-500' : 'border-gray-400'}`}>
-                          {selectedProjects.includes(name) && (
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
-                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center">
+                          <div className={`w-5 h-5 rounded mr-3 flex items-center justify-center border ${selectedProjects.includes(name) ? 'bg-blue-500 border-blue-500' : 'border-gray-400'}`}>
+                            {selectedProjects.includes(name) && (
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                              </svg>
+                            )}
+                          </div>
+                          <span className="text-lg font-medium">{name}</span>
+                        </div>
+                        <button
+                          onClick={(e) => handleShowDeleteConfirm(name, e)}
+                          className="p-1.5 text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                          disabled={deleting}
+                        >
+                          {deleting && confirmDelete.projectName === name ? (
+                            <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                          ) : (
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                             </svg>
                           )}
-                        </div>
-                        <span className="text-lg font-medium">{name}</span>
+                        </button>
                       </div>
                       {/* 文件ID显示 */}
                       {projectDetails[name] && projectDetails[name].file_unique_id && (
-                        <div className="ml-8 mt-1 text-xs text-gray-500">
-                          文件ID: {projectDetails[name].file_unique_id.substring(0, 8)}...
+                        <div className="ml-8 mt-1 text-xs text-gray-500 flex items-center">
+                          <span>文件ID: {projectDetails[name].file_unique_id.substring(0, 8)}...</span>
+                          <button 
+                            onClick={(e) => handleViewFileMappings(projectDetails[name].file_unique_id, e)}
+                            className="ml-2 text-blue-500 hover:text-blue-700 flex items-center"
+                            title="查看文件映射信息"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                          </button>
                         </div>
                       )}
                     </div>
@@ -497,11 +650,117 @@ const ProjectSelection: React.FC = () => {
             )}
           </div>
           
+          {/* 上传文件历史记录 */}
+          <div className="mt-10">
+            <h2 className="text-xl font-semibold mb-4">上传文件历史记录</h2>
+            {loadingFiles ? (
+              <div className="flex justify-center items-center py-8">
+                <svg className="animate-spin h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <span className="ml-2 text-gray-600">加载文件历史记录...</span>
+              </div>
+            ) : uploadedFiles.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">暂无上传文件记录</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full bg-white border border-gray-200 rounded-lg overflow-hidden">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">文件名</th>
+                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">项目名称</th>
+                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">文件大小</th>
+                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">上传时间</th>
+                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
+                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">导入行数/操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200">
+                    {uploadedFiles.map((file) => (
+                      <tr key={file.file_unique_id} className="hover:bg-gray-50">
+                        <td className="py-3 px-4 text-sm text-gray-900">{file.original_filename}</td>
+                        <td className="py-3 px-4 text-sm text-gray-900">{file.project_name}</td>
+                        <td className="py-3 px-4 text-sm text-gray-500">{formatFileSize(file.file_size)}</td>
+                        <td className="py-3 px-4 text-sm text-gray-500">{new Date(file.upload_time).toLocaleString()}</td>
+                        <td className="py-3 px-4 text-sm">
+                          <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${file.status === 'imported' ? 'bg-green-100 text-green-800' : file.status === 'partial' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
+                            {file.status === 'imported' ? '成功' : file.status === 'partial' ? '部分成功' : '失败'}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 text-sm text-gray-500">
+                          <div className="flex items-center">
+                            <span>{file.rows_imported}</span>
+                            {file.status === 'imported' && (
+                              <button 
+                                onClick={(e) => handleViewFileMappings(file.file_unique_id, e)}
+                                className="ml-2 text-blue-500 hover:text-blue-700"
+                                title="查看文件映射信息"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+          
           {/* 合并按钮已移至页面顶部 */}
+        </div>
+      )}
+
+      {/* 确认删除对话框 */}
+      <ConfirmDialog
+        isOpen={confirmDelete.isOpen}
+        title="删除项目"
+        message={`确定要删除项目 "${confirmDelete.projectName}"? 此操作不可撤销，项目中的所有零部件数据将被永久删除。`}
+        confirmText="删除"
+        cancelText="取消"
+        onConfirm={handleConfirmDelete}
+        onCancel={handleCancelDelete}
+      />
+      
+      {/* 文件映射信息对话框 */}
+      {showFileMappings && selectedFileId && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] overflow-hidden">
+            <div className="flex justify-between items-center border-b px-6 py-4">
+              <h3 className="text-lg font-medium">文件映射信息</h3>
+              <button 
+                onClick={handleCloseFileMappings}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="overflow-y-auto p-2" style={{ maxHeight: 'calc(80vh - 4rem)' }}>
+              <FileMappingInfo fileUniqueId={selectedFileId} />
+            </div>
+          </div>
         </div>
       )}
     </div>
   );
+}
+
+/**
+ * 格式化文件大小
+ */
+const formatFileSize = (bytes: number): string => {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
 /**

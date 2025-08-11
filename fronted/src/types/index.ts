@@ -38,3 +38,60 @@ export interface ProjectNote {
   created_at?: string;
   updated_at?: string;
 }
+
+// 合并项目类型定义
+export interface MergedProject {
+  id: number;
+  merged_project_name: string;
+  source_projects: string[];
+  created_at: string;
+}
+
+// 合并零部件类型定义
+export interface MergedPart {
+  id: number;
+  merged_project_id: number;
+  level: number;
+  part_code: string;
+  part_name: string;
+  spec: string;
+  version: string;
+  material: string;
+  unit_count_per_level: string;
+  unit_weight_kg: string;
+  total_weight_kg: number;
+  part_property: string;
+  drawing_size: string;
+  reference_number: string;
+  purchase_status: string;
+  process_route: string;
+  remark: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// 上传文件类型定义
+export interface UploadedFile {
+  id: number;
+  file_unique_id: string;
+  original_filename: string;
+  file_size: number;
+  file_type: string;
+  upload_time: string;
+  project_name: string;
+  status: string;
+  rows_imported: number;
+  error_message?: string;
+}
+
+// 文件映射类型定义
+export interface FileMapping {
+  id: number;
+  file_unique_id: string;
+  entity_type: string; // 'project', 'part', 等
+  entity_id: string;
+  mapping_type: string; // 'excel_import', 'part_in_excel', 等
+  mapping_data: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
