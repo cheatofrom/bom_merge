@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getProjectNames, getAllProjects, uploadPartsExcel, getProjectNote, saveProjectNote, deleteProject, getUploadedFiles } from '../services/api';
+import { getProjectNames, getAllProjects, uploadPartsExcel, getProjectNote, saveProjectNote, getUploadedFiles, updateProjectName, deleteProjectByFileId } from '../services/api';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { ProjectNote, Project, UploadedFile, FileMapping } from '../types';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -14,12 +14,10 @@ import FileMappingInfo from '../components/FileMappingInfo';
 
 const ProjectSelection: React.FC = () => {
   // 所有可用项目名称列表
-  const [projectNames, setProjectNames] = useState<string[]>([]);
-  // 项目详细信息，包含文件ID
+  const [, setProjectNames] = useState<string[]>([]);
+  // 项目详细信息，以文件ID为键
   const [projectDetails, setProjectDetails] = useState<Record<string, Project>>({});
-  // 用户选中的项目列表（项目名称）
-  const [selectedProjects, setSelectedProjects] = useState<string[]>([]);
-  // 用户选中的项目文件ID列表
+  // 用户选中的项目文件ID列表（主要选择状态）
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   // 页面加载状态
   const [loading, setLoading] = useState<boolean>(true);
@@ -31,24 +29,28 @@ const ProjectSelection: React.FC = () => {
   const [uploadSuccess, setUploadSuccess] = useState<{status: string, rows: number, details?: {filename: string, project_name: string, file_id: string, status: string, rows_imported?: number, error?: string}[]} | null>(null);
   // 文件上传输入框引用
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // 项目备注信息，键为项目名，值为备注内容
+  // 项目备注信息，以文件ID为键
   const [projectNotes, setProjectNotes] = useState<Record<string, string>>({});
   // 当前正在编辑的项目备注
-  const [editingNote, setEditingNote] = useState<{project: string, note: string} | null>(null);
+  const [editingNote, setEditingNote] = useState<{fileId: string, note: string} | null>(null);
   // 备注保存状态
   const [savingNote, setSavingNote] = useState<boolean>(false);
   // 删除项目状态
   const [deleting, setDeleting] = useState<boolean>(false);
   // 确认删除对话框状态
-  const [confirmDelete, setConfirmDelete] = useState<{isOpen: boolean, projectName: string}>({isOpen: false, projectName: ''});
+  const [confirmDelete, setConfirmDelete] = useState<{isOpen: boolean, fileId: string, projectName: string}>({isOpen: false, fileId: '', projectName: ''});
   // 上传文件列表
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   // 上传文件加载状态
-  const [loadingFiles, setLoadingFiles] = useState<boolean>(false);
+  const [loadingFiles] = useState<boolean>(false);
   // 当前选中查看的文件ID
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   // 文件映射信息显示状态
   const [showFileMappings, setShowFileMappings] = useState<boolean>(false);
+  // 当前正在编辑的项目名称
+  const [editingProjectName, setEditingProjectName] = useState<{oldName: string, newName: string, fileId: string} | null>(null);
+  // 项目名称保存状态
+  const [savingProjectName, setSavingProjectName] = useState<boolean>(false);
   // 路由导航hook
   const navigate = useNavigate();
 
@@ -68,37 +70,34 @@ const ProjectSelection: React.FC = () => {
         const projects = await getAllProjects();
         const detailsObj: Record<string, Project> = {};
         
-        // 将项目详细信息按项目名称组织成对象
+        // 将项目详细信息按文件ID组织成对象
         projects.forEach(project => {
-          detailsObj[project.project_name] = project;
+          if (project.file_unique_id) {
+            detailsObj[project.file_unique_id] = project;
+          }
         });
         
         setProjectDetails(detailsObj);
         setError(null);
         
-        // 获取所有项目的备注
+        // 获取上传文件列表
+        const files = await getUploadedFiles();
+        setUploadedFiles(files);
+        
+        // 获取所有项目的备注，以文件ID为键
         const notesObj: Record<string, string> = {};
-        for (const name of names) {
+        for (const file of files) {
           try {
-            const note = await getProjectNote(name);
-            notesObj[name] = note.note || '';
+            const note = await getProjectNote(file.project_name);
+            notesObj[file.file_unique_id] = note.note || '';
           } catch (err) {
-            console.error(`获取项目 ${name} 的备注失败:`, err);
-            notesObj[name] = '';
+            console.error(`获取项目 ${file.project_name} 的备注失败:`, err);
+            notesObj[file.file_unique_id] = '';
           }
         }
         setProjectNotes(notesObj);
         
-        // 获取上传文件列表
-        try {
-          setLoadingFiles(true);
-          const files = await getUploadedFiles();
-          setUploadedFiles(files);
-        } catch (err) {
-          console.error('获取上传文件列表失败:', err);
-        } finally {
-          setLoadingFiles(false);
-        }
+
       } catch (err) {
         setError('获取项目列表失败，请稍后重试');
         console.error('Error fetching project data:', err);
@@ -112,25 +111,11 @@ const ProjectSelection: React.FC = () => {
 
   /**
    * @function handleProjectToggle
-   * @description 切换项目选中状态，如果项目已选中则取消选中，否则添加到选中列表
-   * 同时更新选中的项目名称列表和文件ID列表
-   * @param {string} projectName - 要切换状态的项目名称
+   * @description 切换项目选中状态，基于文件ID进行操作
+   * @param {string} fileId - 要切换状态的文件ID
    */
-  const handleProjectToggle = (projectName: string) => {
-    // 更新选中的项目名称列表
-    setSelectedProjects(prev => {
-      if (prev.includes(projectName)) {
-        return prev.filter(name => name !== projectName);
-      } else {
-        return [...prev, projectName];
-      }
-    });
-    
-    // 同时更新选中的文件ID列表
+  const handleProjectToggle = (fileId: string) => {
     setSelectedFileIds(prev => {
-      const fileId = projectDetails[projectName]?.file_unique_id || '';
-      if (!fileId) return prev; // 如果没有文件ID，不更新
-      
       if (prev.includes(fileId)) {
         return prev.filter(id => id !== fileId);
       } else {
@@ -141,14 +126,20 @@ const ProjectSelection: React.FC = () => {
 
   /**
    * @function handleMergeClick
-   * @description 处理合并按钮点击事件，将选中的项目列表和文件ID列表作为参数导航到合并页面
+   * @description 处理合并按钮点击事件，基于选中的文件ID列表导航到合并页面
    * @throws {Error} 如果没有选中任何项目，显示错误信息
    */
   const handleMergeClick = () => {
-    if (selectedProjects.length === 0 || selectedFileIds.length === 0) {
+    if (selectedFileIds.length === 0) {
       setError('请至少选择一个项目');
       return;
     }
+    
+    // 根据选中的文件ID获取对应的项目名称
+    const selectedProjects = selectedFileIds.map(fileId => {
+      const project = projectDetails[fileId];
+      return project ? project.project_name : '';
+    }).filter(name => name !== '');
     
     // 将选中的项目列表和文件ID列表序列化并编码为URL参数
     const projectsParam = encodeURIComponent(JSON.stringify(selectedProjects));
@@ -207,29 +198,16 @@ const ProjectSelection: React.FC = () => {
       
       // 获取所有项目详细信息
       const projects = await getAllProjects();
-      const detailsObj: Record<string, Project> = {...projectDetails};
+      const detailsObj: Record<string, Project> = {};
       
-      // 将项目详细信息按项目名称组织成对象
+      // 将项目详细信息按文件ID组织成对象
       projects.forEach(project => {
-        detailsObj[project.project_name] = project;
+        if (project.file_unique_id) {
+          detailsObj[project.file_unique_id] = project;
+        }
       });
       
       setProjectDetails(detailsObj);
-      
-      // 获取新项目的备注信息
-      const notesObj = {...projectNotes};
-      for (const name of names) {
-        if (!notesObj[name]) {
-          try {
-            const note = await getProjectNote(name);
-            notesObj[name] = note.note || '';
-          } catch (err) {
-            console.error(`获取项目 ${name} 的备注失败:`, err);
-            notesObj[name] = '';
-          }
-        }
-      }
-      setProjectNotes(notesObj);
       
       // 获取最新的上传文件列表
       try {
@@ -253,12 +231,12 @@ const ProjectSelection: React.FC = () => {
   /**
    * @function handleEditNote
    * @description 开始编辑指定项目的备注信息
-   * @param {string} projectName - 要编辑备注的项目名称
+   * @param {string} fileId - 要编辑备注的文件ID
    */
-  const handleEditNote = (projectName: string) => {
+  const handleEditNote = (fileId: string) => {
     setEditingNote({
-      project: projectName,
-      note: projectNotes[projectName] || ''
+      fileId: fileId,
+      note: projectNotes[fileId] || ''
     });
   };
   
@@ -274,26 +252,24 @@ const ProjectSelection: React.FC = () => {
       setSavingNote(true);
       setError(null);
       
-      // 查找上传成功的文件ID，如果是刚上传的项目，关联文件ID
-      let fileUniqueId = '';
-      if (uploadSuccess && uploadSuccess.details) {
-        const projectDetail = uploadSuccess.details.find(d => d.project_name === editingNote.project && d.status === 'success');
-        if (projectDetail) {
-          fileUniqueId = projectDetail.file_id;
-        }
+      // 根据文件ID获取项目信息
+      const project = projectDetails[editingNote.fileId];
+      if (!project) {
+        setError('找不到对应的项目信息');
+        return;
       }
       
       // 调用API保存项目备注
       const result = await saveProjectNote({
-        project_name: editingNote.project,
-        file_unique_id: fileUniqueId,
+        project_name: project.project_name,
+        file_unique_id: editingNote.fileId,
         note: editingNote.note
       });
       
       // 更新本地备注状态
       setProjectNotes(prev => ({
         ...prev,
-        [editingNote.project]: result.note
+        [editingNote.fileId]: result.note
       }));
       
       // 关闭编辑模式
@@ -309,12 +285,13 @@ const ProjectSelection: React.FC = () => {
   /**
    * @function handleShowDeleteConfirm
    * @description 显示删除确认对话框
+   * @param {string} fileId - 要删除的文件ID
    * @param {string} projectName - 要删除的项目名称
    * @param {React.MouseEvent} e - 点击事件对象
    */
-  const handleShowDeleteConfirm = (projectName: string, e: React.MouseEvent) => {
+  const handleShowDeleteConfirm = (fileId: string, projectName: string, e: React.MouseEvent) => {
     e.stopPropagation(); // 阻止事件冒泡，避免触发项目选择
-    setConfirmDelete({isOpen: true, projectName});
+    setConfirmDelete({isOpen: true, fileId, projectName});
   };
 
   /**
@@ -322,7 +299,7 @@ const ProjectSelection: React.FC = () => {
    * @description 取消删除操作
    */
   const handleCancelDelete = () => {
-    setConfirmDelete({isOpen: false, projectName: ''});
+    setConfirmDelete({isOpen: false, fileId: '', projectName: ''});
   };
 
   /**
@@ -333,16 +310,32 @@ const ProjectSelection: React.FC = () => {
   const handleConfirmDelete = async () => {
     try {
       setDeleting(true);
-      await deleteProject(confirmDelete.projectName);
+      await deleteProjectByFileId(confirmDelete.fileId);
       
       // 更新项目列表
       setProjectNames(prev => prev.filter(name => name !== confirmDelete.projectName));
       
-      // 如果该项目在已选择列表中，也需要移除
-      setSelectedProjects(prev => prev.filter(name => name !== confirmDelete.projectName));
+      // 如果该文件ID在已选择列表中，也需要移除
+      setSelectedFileIds(prev => prev.filter(id => id !== confirmDelete.fileId));
+      
+      // 更新上传文件列表
+      setUploadedFiles(prev => prev.filter(file => file.file_unique_id !== confirmDelete.fileId));
+      
+      // 移除项目详细信息和备注
+      setProjectDetails(prev => {
+        const newDetails = {...prev};
+        delete newDetails[confirmDelete.fileId];
+        return newDetails;
+      });
+      
+      setProjectNotes(prev => {
+        const newNotes = {...prev};
+        delete newNotes[confirmDelete.fileId];
+        return newNotes;
+      });
       
       // 关闭确认对话框
-      setConfirmDelete({isOpen: false, projectName: ''});
+      setConfirmDelete({isOpen: false, fileId: '', projectName: ''});
     } catch (err) {
       console.error('删除项目失败:', err);
       setError('删除项目失败，请重试');
@@ -379,6 +372,89 @@ const ProjectSelection: React.FC = () => {
   const handleCancelEditNote = () => {
     setEditingNote(null);
   };
+  
+  /**
+   * @function handleEditProjectName
+   * @description 开始编辑指定项目的名称
+   * @param {string} projectName - 要编辑名称的项目名称
+   * @param {string} fileUniqueId - 项目对应的文件唯一ID
+   * @param {React.MouseEvent} e - 点击事件对象
+   */
+  const handleEditProjectName = (projectName: string, fileUniqueId: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // 阻止事件冒泡，避免触发项目选择
+    setEditingProjectName({
+      oldName: projectName,
+      newName: projectName,
+      fileId: fileUniqueId
+    });
+  };
+  
+  /**
+   * @function handleSaveProjectName
+   * @description 保存当前正在编辑的项目名称
+   * @async
+   */
+  const handleSaveProjectName = async () => {
+    if (!editingProjectName) return;
+    
+    try {
+      setSavingProjectName(true);
+      setError(null);
+      
+      // 调用API更新项目名称
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const result = await updateProjectName(editingProjectName.fileId, editingProjectName.newName);
+      
+      // 重新获取最新的项目名称列表和项目详细信息
+      const names = await getProjectNames();
+      setProjectNames(names);
+      
+      const projects = await getAllProjects();
+      const detailsObj: Record<string, Project> = {};
+      
+      // 将项目详细信息按文件ID组织成对象
+      projects.forEach(project => {
+        if (project.file_unique_id) {
+          detailsObj[project.file_unique_id] = project;
+        }
+      });
+      
+      setProjectDetails(detailsObj);
+      
+      // 重新获取上传文件列表
+      const files = await getUploadedFiles();
+      setUploadedFiles(files);
+      
+      // 重新获取项目备注（以文件ID为键，项目名称更新不影响备注）
+      const notesObj: Record<string, string> = {};
+      for (const file of files) {
+        try {
+          const note = await getProjectNote(file.project_name);
+          notesObj[file.file_unique_id] = note.note || '';
+        } catch (err) {
+          console.error(`获取项目 ${file.project_name} 的备注失败:`, err);
+          notesObj[file.file_unique_id] = '';
+        }
+      }
+      setProjectNotes(notesObj);
+      
+      // 关闭编辑模式
+      setEditingProjectName(null);
+    } catch (err) {
+      console.error('更新项目名称失败:', err);
+      setError('更新项目名称失败，请稍后重试');
+    } finally {
+      setSavingProjectName(false);
+    }
+  };
+  
+  /**
+   * @function handleCancelEditProjectName
+   * @description 取消编辑项目名称，不保存更改
+   */
+  const handleCancelEditProjectName = () => {
+    setEditingProjectName(null);
+  };
 
   /**
    * @returns {JSX.Element} 渲染项目选择页面的UI组件
@@ -396,8 +472,8 @@ const ProjectSelection: React.FC = () => {
           {/* 合并选中项目按钮 */}
           <button
             onClick={handleMergeClick}
-            disabled={selectedProjects.length === 0}
-            className={`px-6 py-3 rounded-lg shadow-md font-medium text-lg flex items-center transition-all duration-200 ${selectedProjects.length === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg'}`}
+            disabled={selectedFileIds.length === 0}
+            className={`px-6 py-3 rounded-lg shadow-md font-medium text-lg flex items-center transition-all duration-200 ${selectedFileIds.length === 0 ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700 hover:shadow-lg'}`}
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
@@ -503,7 +579,7 @@ const ProjectSelection: React.FC = () => {
         <div>
           <div className="mb-4">
             {/* 根据是否有项目显示不同内容 */}
-            {projectNames.length === 0 ? (
+            {uploadedFiles.length === 0 ? (
               /* 无项目时显示空状态提示 */
               <div className="flex flex-col items-center justify-center py-16 bg-gray-50 rounded-lg border border-gray-200">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -524,62 +600,126 @@ const ProjectSelection: React.FC = () => {
             ) : (
               /* 有项目时显示项目卡片网格 */
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {/* 遍历所有项目名称，为每个项目创建卡片 */}
-                {projectNames.map(name => (
+                {/* 遍历所有上传文件，为每个文件创建卡片 */}
+                {uploadedFiles.map(file => (
                   <div 
-                    key={name}
-                    className={`border p-5 rounded-lg shadow-md transition-all duration-200 hover:shadow-lg ${selectedProjects.includes(name) ? 'bg-blue-50 border-blue-500' : 'hover:border-gray-300'}`}
+                    key={file.file_unique_id}
+                    className={`border p-5 rounded-lg shadow-md transition-all duration-200 hover:shadow-lg ${selectedFileIds.includes(file.file_unique_id) ? 'bg-blue-50 border-blue-500' : 'hover:border-gray-300'}`}
                   >
-                    <div className="cursor-pointer" onClick={() => handleProjectToggle(name)}>
+                    <div className="cursor-pointer" onClick={() => handleProjectToggle(file.file_unique_id)}>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center">
-                          <div className={`w-5 h-5 rounded mr-3 flex items-center justify-center border ${selectedProjects.includes(name) ? 'bg-blue-500 border-blue-500' : 'border-gray-400'}`}>
-                            {selectedProjects.includes(name) && (
+                          <div className={`w-5 h-5 rounded mr-3 flex items-center justify-center border ${selectedFileIds.includes(file.file_unique_id) ? 'bg-blue-500 border-blue-500' : 'border-gray-400'}`}>
+                            {selectedFileIds.includes(file.file_unique_id) && (
                               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-white" viewBox="0 0 20 20" fill="currentColor">
                                 <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                               </svg>
                             )}
                           </div>
-                          <span className="text-lg font-medium">{name}</span>
-                        </div>
-                        <button
-                          onClick={(e) => handleShowDeleteConfirm(name, e)}
-                          className="p-1.5 text-red-500 hover:bg-red-50 rounded-full transition-colors"
-                          disabled={deleting}
-                        >
-                          {deleting && confirmDelete.projectName === name ? (
-                            <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
+                          {/* 编辑项目名称模式 */}
+                          {editingProjectName && editingProjectName.fileId === file.file_unique_id ? (
+                            <div className="flex-1" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="text"
+                                className="w-full p-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                value={editingProjectName.newName}
+                                onChange={(e) => setEditingProjectName({...editingProjectName, newName: e.target.value})}
+                                autoFocus
+                                disabled={savingProjectName}
+                              />
+                            </div>
                           ) : (
-                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
+                            <span className="text-lg font-medium">{file.project_name}</span>
                           )}
-                        </button>
+                        </div>
+                        <div className="flex items-center space-x-1">
+                          {/* 编辑项目名称模式下的保存和取消按钮 */}
+                          {editingProjectName && editingProjectName.fileId === file.file_unique_id ? (
+                            <>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCancelEditProjectName();
+                                }}
+                                disabled={savingProjectName}
+                                className="p-1.5 text-gray-500 hover:bg-gray-100 rounded transition-colors"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSaveProjectName();
+                                }}
+                                disabled={savingProjectName || !editingProjectName.newName.trim() || editingProjectName.newName === editingProjectName.oldName}
+                                className={`p-1.5 rounded transition-colors ${savingProjectName || !editingProjectName.newName.trim() || editingProjectName.newName === editingProjectName.oldName ? 'text-gray-400 cursor-not-allowed' : 'text-green-500 hover:bg-green-50'}`}
+                              >
+                                {savingProjectName ? (
+                                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                  </svg>
+                                ) : (
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 13l4 4L19 7" />
+                                  </svg>
+                                )}
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              {/* 编辑名称按钮 */}
+                              <button
+                                onClick={(e) => handleEditProjectName(file.project_name, file.file_unique_id, e)}
+                                className="p-1.5 text-blue-500 hover:bg-blue-50 rounded-full transition-colors"
+                                title="编辑项目名称"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                </svg>
+                              </button>
+                              {/* 删除按钮 */}
+                              <button
+                                onClick={(e) => handleShowDeleteConfirm(file.file_unique_id, file.project_name, e)}
+                                className="p-1.5 text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                                disabled={deleting}
+                              >
+                                {deleting && confirmDelete.fileId === file.file_unique_id ? (
+                                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                  </svg>
+                                ) : (
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                )}
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
                       {/* 文件ID显示 */}
-                      {projectDetails[name] && projectDetails[name].file_unique_id && (
-                        <div className="ml-8 mt-1 text-xs text-gray-500 flex items-center">
-                          <span>文件ID: {projectDetails[name].file_unique_id.substring(0, 8)}...</span>
-                          <button 
-                            onClick={(e) => handleViewFileMappings(projectDetails[name].file_unique_id, e)}
-                            className="ml-2 text-blue-500 hover:text-blue-700 flex items-center"
-                            title="查看文件映射信息"
-                          >
+                      <div className="ml-8 mt-1 text-xs text-gray-500 flex items-center">
+                        <span>文件ID: {file.file_unique_id.substring(0, 8)}...</span>
+                        <button 
+                          onClick={(e) => handleViewFileMappings(file.file_unique_id, e)}
+                          className="ml-2 text-blue-500 hover:text-blue-700 flex items-center"
+                          title="查看文件映射信息"
+                        >
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                             </svg>
-                          </button>
-                        </div>
-                      )}
+                        </button>
+                      </div>
                     </div>
                     
                     {/* 项目备注区域 - 显示或编辑项目备注 */}
                     <div className="mt-3 pt-3 border-t border-gray-200">
                       {/* 编辑模式 - 当前项目正在编辑备注时显示 */}
-                      {editingNote && editingNote.project === name ? (
+                      {editingNote && editingNote.fileId === file.file_unique_id ? (
                         <div>
                           <textarea
                             className="w-full p-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
@@ -620,13 +760,13 @@ const ProjectSelection: React.FC = () => {
                           className="min-h-[40px] text-sm text-gray-600 hover:bg-gray-50 p-2 rounded-md cursor-pointer flex items-start"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleEditNote(name);
+                            handleEditNote(file.file_unique_id);
                           }}
                         >
-                          {projectNotes[name] ? (
+                          {projectNotes[file.file_unique_id] ? (
                             <div className="flex-1">
                               <div className="font-medium text-gray-700 mb-1">备注:</div>
-                              <div className="whitespace-pre-wrap">{projectNotes[name]}</div>
+                              <div className="whitespace-pre-wrap">{projectNotes[file.file_unique_id]}</div>
                             </div>
                           ) : (
                             <div className="flex items-center text-gray-400">
@@ -718,7 +858,7 @@ const ProjectSelection: React.FC = () => {
 
       {/* 确认删除对话框 */}
       <ConfirmDialog
-        isOpen={confirmDelete.isOpen}
+        isOpen={!!confirmDelete.fileId}
         title="删除项目"
         message={`确定要删除项目 "${confirmDelete.projectName}"? 此操作不可撤销，项目中的所有零部件数据将被永久删除。`}
         confirmText="删除"

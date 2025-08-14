@@ -200,7 +200,19 @@ def update_project_name(file_unique_id, new_project_name):
     cur = conn.cursor()
     
     try:
-        # 更新项目名称
+        # 首先获取旧的项目名称，用于更新merged_projects表
+        cur.execute("""
+            SELECT project_name FROM uploaded_files
+            WHERE file_unique_id = %s
+        """, (file_unique_id,))
+        
+        old_project_name_row = cur.fetchone()
+        if not old_project_name_row:
+            return False
+            
+        old_project_name = old_project_name_row[0]
+        
+        # 更新uploaded_files表中的项目名称
         cur.execute("""
             UPDATE uploaded_files
             SET project_name = %s
@@ -209,10 +221,28 @@ def update_project_name(file_unique_id, new_project_name):
         """, (new_project_name, file_unique_id))
         
         row = cur.fetchone()
-        conn.commit()
         
-        # 如果找到并更新了记录，返回True
-        return row is not None
+        # 如果找到并更新了uploaded_files表中的记录
+        if row is not None:
+            # 同时更新parts_library表中的项目名称
+            cur.execute("""
+                UPDATE parts_library
+                SET project_name = %s
+                WHERE file_unique_id = %s
+            """, (new_project_name, file_unique_id))
+            
+            # 更新merged_projects表中source_projects数组中的项目名称
+            cur.execute("""
+                UPDATE merged_projects
+                SET source_projects = array_replace(source_projects, %s, %s)
+                WHERE %s = ANY(source_projects)
+            """, (old_project_name, new_project_name, old_project_name))
+            
+            conn.commit()
+            return True
+        else:
+            conn.rollback()
+            return False
     except Exception as e:
         conn.rollback()
         raise e

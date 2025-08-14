@@ -157,7 +157,7 @@ export const updateParts = async (parts: Partial<Part>[]): Promise<{status: stri
 
 // 保存合并项目
 export const saveMergedProject = async (mergedProjectName: string, sourceProjects: string[], parts: Part[], sourceFileIds?: string[]): Promise<{status: string, merged_project_id: number, message: string}> => {
-  const response = await api.post<{status: string, merged_project_id: number, message: string}>('/save_merged_project', {
+  const response = await api.post<{status: string, merged_project_id: number, message: string}>('/save-merged-project', {
     merged_project_name: mergedProjectName,
     source_projects: sourceProjects,
     source_file_ids: sourceFileIds,
@@ -168,32 +168,32 @@ export const saveMergedProject = async (mergedProjectName: string, sourceProject
 
 // 获取所有合并项目
 export const getMergedProjects = async (): Promise<MergedProject[]> => {
-  const response = await api.get<MergedProject[]>('/merged_projects');
+  const response = await api.get<MergedProject[]>('/merged-projects');
   return response.data;
 };
 
 // 获取合并项目的零部件
 export const getMergedProjectParts = async (mergedProjectId: number): Promise<{parts: MergedPart[], project: MergedProject}> => {
-  const response = await api.get<{parts: MergedPart[], project: MergedProject}>(`/merged_project_parts/${mergedProjectId}`);
+  const response = await api.get<{parts: MergedPart[], project: MergedProject}>(`/merged-project-parts/${mergedProjectId}`);
   return response.data;
 };
 
 // 删除合并项目
 export const deleteMergedProject = async (mergedProjectId: number): Promise<{status: string, message: string}> => {
-  const response = await api.delete<{status: string, message: string}>(`/merged_projects/${mergedProjectId}`);
+  const response = await api.delete<{status: string, message: string}>(`/merged-projects/${mergedProjectId}`);
   return response.data;
 };
 
 // 删除合并项目中的零部件
 export const deleteMergedPart = async (partId: number): Promise<{status: string, message: string}> => {
-  const response = await api.delete<{status: string, message: string}>(`/merged_parts/${partId}`);
+  const response = await api.delete<{status: string, message: string}>(`/merged-parts/${partId}`);
   return response.data;
 };
 
 // 导出合并项目为Excel
 export const exportMergedProject = async (mergedProjectId: number, projectName?: string): Promise<Blob> => {
   try {
-    const response = await api.get(`/export_merged_project/${mergedProjectId}`, {
+    const response = await api.get(`/export-merged-project/${mergedProjectId}`, {
       responseType: 'blob'
     });
     
@@ -241,5 +241,11 @@ export const exportMergedProject = async (mergedProjectId: number, projectName?:
 // 删除普通项目
 export const deleteProject = async (projectName: string): Promise<{status: string, message: string}> => {
   const response = await api.delete<{status: string, message: string}>(`/projects/${projectName}`);
+  return response.data;
+};
+
+// 通过文件ID删除项目
+export const deleteProjectByFileId = async (fileUniqueId: string): Promise<{status: string, message: string}> => {
+  const response = await api.delete<{status: string, message: string}>(`/uploaded_files/${fileUniqueId}`);
   return response.data;
 };

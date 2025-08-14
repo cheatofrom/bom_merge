@@ -497,7 +497,17 @@ def save_merged_project(req: SaveMergedProjectRequest):
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": f"保存合并项目失败: {str(e)}"})
 
-# 获取所有合并项目API
+# 保存合并项目API - 带连字符的路由（新增）
+@app.post("/save-merged-project")
+def save_merged_project_with_hyphen(req: SaveMergedProjectRequest):
+    return save_merged_project(req)
+
+# 获取所有合并项目API - 带连字符的路由（新增）
+@app.get("/merged-projects")
+def get_merged_projects_with_hyphen():
+    return get_merged_projects()
+
+# 获取合并项目API
 @app.get("/merged_projects")
 def get_merged_projects():
     try:
@@ -526,6 +536,11 @@ def get_merged_projects():
         return result
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"获取合并项目时出错: {str(e)}"})
+
+# 获取合并项目的零部件API - 带连字符的路由（新增）
+@app.get("/merged-project-parts/{merged_project_id}")
+def get_merged_project_parts_with_hyphen(merged_project_id: int):
+    return get_merged_project_parts(merged_project_id)
 
 # 获取合并项目的零部件API
 @app.get("/merged_project_parts/{merged_project_id}")
@@ -590,6 +605,16 @@ def get_merged_project_parts(merged_project_id: int):
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"获取合并项目零部件时出错: {str(e)}"})
 
+# 删除合并项目API - 带连字符的路由（新增）
+@app.delete("/merged-projects/{merged_project_id}")
+def delete_merged_project_with_hyphen(merged_project_id: int):
+    return delete_merged_project(merged_project_id)
+
+# 删除合并项目中的零部件API - 带连字符的路由（新增）
+@app.delete("/merged-parts/{part_id}")
+def delete_merged_part_with_hyphen(part_id: int):
+    return delete_merged_part(part_id)
+
 # 删除合并项目API
 @app.delete("/merged_projects/{merged_project_id}")
 def delete_merged_project(merged_project_id: int):
@@ -638,7 +663,11 @@ def delete_merged_part(part_id: int):
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": f"删除零部件失败: {str(e)}"})
 
-# 导出合并项目为Excel API
+# 导出合并项目为Excel API - 带连字符的路由（新增）
+@app.get("/export-merged-project/{merged_project_id}")
+def export_merged_project_with_hyphen(merged_project_id: int):
+    return export_merged_project(merged_project_id)
+
 @app.get("/export_merged_project/{merged_project_id}")
 def export_merged_project(merged_project_id: int):
     try:
@@ -722,6 +751,51 @@ def delete_project(project_name: str):
         # 删除指定项目的所有零部件
         cur.execute("""
             DELETE FROM parts_library
+            WHERE project_name = %s
+        """, (project_name,))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {"status": "success", "message": "项目删除成功"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"status": "error", "message": f"删除项目失败: {str(e)}"})
+
+# 基于文件ID删除项目API
+@app.delete("/uploaded_files/{file_unique_id}")
+def delete_project_by_file_id(file_unique_id: str):
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        # 首先获取项目名称用于删除备注
+        cur.execute("""
+            SELECT project_name FROM uploaded_files
+            WHERE file_unique_id = %s
+        """, (file_unique_id,))
+        
+        result = cur.fetchone()
+        if not result:
+            return JSONResponse(status_code=404, content={"status": "error", "message": "文件不存在"})
+        
+        project_name = result[0]
+        
+        # 删除parts_library表中对应文件ID的所有记录
+        cur.execute("""
+            DELETE FROM parts_library
+            WHERE file_unique_id = %s
+        """, (file_unique_id,))
+        
+        # 删除uploaded_files表中的记录
+        cur.execute("""
+            DELETE FROM uploaded_files
+            WHERE file_unique_id = %s
+        """, (file_unique_id,))
+        
+        # 删除project_notes表中的记录
+        cur.execute("""
+            DELETE FROM project_notes
             WHERE project_name = %s
         """, (project_name,))
         
