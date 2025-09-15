@@ -367,7 +367,7 @@ const MergedParts: React.FC = () => {
   };
 
   return (
-    <div className="w-full min-h-screen bg-gray-50 px-4 sm:px-6 lg:px-8 py-6">
+    <div className="w-full min-h-screen bg-gray-50 py-6">
       {/* 保存合并项目对话框 */}
       <ConfirmDialog
         isOpen={showSaveDialog}
@@ -397,8 +397,8 @@ const MergedParts: React.FC = () => {
         }}
       />
       
-      {/* 取消最大宽度限制，父容器铺满全屏 */}
-      <div className="mx-0">
+      {/* 页面内容容器 */}
+      <div className="px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center mb-6 flex-wrap gap-4">
           <h1 className="text-3xl font-bold text-blue-700">合并零部件列表</h1>
           <div className="flex gap-3">
@@ -582,7 +582,7 @@ const MergedParts: React.FC = () => {
             <span className="ml-3 text-lg text-gray-600">正在加载零部件数据...</span>
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-xl border shadow-md bg-white">
+          <div className="overflow-x-auto rounded-xl border shadow-md bg-white -mx-4 sm:-mx-6 lg:-mx-8" style={{maxWidth: '100vw'}}>
             {/* 数据为空时提示 */}
             {filteredParts.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 bg-gray-50 rounded-lg border border-gray-200">
@@ -644,7 +644,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(20, ((editedParts[part.id]?.level !== undefined ? editedParts[part.id].level : part.level) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.level !== undefined ? editedParts[part.id].level : part.level}
                               onChange={(e) => handleCellChange(part.id, 'level', e.target.value)}
                             />
@@ -663,7 +664,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.part_name !== undefined ? editedParts[part.id].part_name : part.part_name) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.part_name !== undefined ? editedParts[part.id].part_name : part.part_name}
                               onChange={(e) => handleCellChange(part.id, 'part_name', e.target.value)}
                             />
@@ -679,7 +681,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.spec !== undefined ? editedParts[part.id].spec : part.spec) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.spec !== undefined ? editedParts[part.id].spec : part.spec}
                               onChange={(e) => handleCellChange(part.id, 'spec', e.target.value)}
                             />
@@ -695,7 +698,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(40, ((editedParts[part.id]?.version !== undefined ? editedParts[part.id].version : part.version) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.version !== undefined ? editedParts[part.id].version : part.version}
                               onChange={(e) => handleCellChange(part.id, 'version', e.target.value)}
                             />
@@ -711,7 +715,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.material !== undefined ? editedParts[part.id].material : part.material) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.material !== undefined ? editedParts[part.id].material : part.material}
                               onChange={(e) => handleCellChange(part.id, 'material', e.target.value)}
                             />
@@ -727,7 +732,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(50, ((editedParts[part.id]?.unit_count_per_level !== undefined ? editedParts[part.id].unit_count_per_level : part.unit_count_per_level) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.unit_count_per_level !== undefined ? editedParts[part.id].unit_count_per_level : part.unit_count_per_level}
                               onChange={(e) => handleCellChange(part.id, 'unit_count_per_level', e.target.value)}
                             />
@@ -743,7 +749,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.unit_weight_kg !== undefined ? editedParts[part.id].unit_weight_kg : part.unit_weight_kg) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.unit_weight_kg !== undefined ? editedParts[part.id].unit_weight_kg : part.unit_weight_kg}
                               onChange={(e) => handleCellChange(part.id, 'unit_weight_kg', e.target.value)}
                             />
@@ -758,12 +765,13 @@ const MergedParts: React.FC = () => {
                         <td className="border px-4 py-2 text-center whitespace-nowrap">
                           {editMode ? (
                             <input
-                              type="number"
-                              step="0.001"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              value={editedParts[part.id]?.total_weight_kg !== undefined ? editedParts[part.id].total_weight_kg : part.total_weight_kg}
-                              onChange={(e) => handleCellChange(part.id, 'total_weight_kg', parseFloat(e.target.value) || 0)}
-                            />
+                                  type="number"
+                                  step="0.001"
+                                  className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                                  style={{width: `${Math.max(60, ((editedParts[part.id]?.total_weight_kg !== undefined ? editedParts[part.id].total_weight_kg : part.total_weight_kg) || '').toString().length * 8 + 32)}px`}}
+                                  value={editedParts[part.id]?.total_weight_kg !== undefined ? editedParts[part.id].total_weight_kg : part.total_weight_kg}
+                                  onChange={(e) => handleCellChange(part.id, 'total_weight_kg', parseFloat(e.target.value) || 0)}
+                                />
                           ) : (
                             <span className={hasConflict && conflictInfo?.conflictFields.includes('total_weight_kg') ? 'text-red-600 font-bold' : ''}>
                               {part.total_weight_kg}
@@ -776,7 +784,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.part_property !== undefined ? editedParts[part.id].part_property : part.part_property) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.part_property !== undefined ? editedParts[part.id].part_property : part.part_property}
                               onChange={(e) => handleCellChange(part.id, 'part_property', e.target.value)}
                             />
@@ -792,7 +801,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(50, ((editedParts[part.id]?.drawing_size !== undefined ? editedParts[part.id].drawing_size : part.drawing_size) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.drawing_size !== undefined ? editedParts[part.id].drawing_size : part.drawing_size}
                               onChange={(e) => handleCellChange(part.id, 'drawing_size', e.target.value)}
                             />
@@ -808,7 +818,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.reference_number !== undefined ? editedParts[part.id].reference_number : part.reference_number) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.reference_number !== undefined ? editedParts[part.id].reference_number : part.reference_number}
                               onChange={(e) => handleCellChange(part.id, 'reference_number', e.target.value)}
                             />
@@ -824,7 +835,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.purchase_status !== undefined ? editedParts[part.id].purchase_status : part.purchase_status) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.purchase_status !== undefined ? editedParts[part.id].purchase_status : part.purchase_status}
                               onChange={(e) => handleCellChange(part.id, 'purchase_status', e.target.value)}
                             />
@@ -840,7 +852,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.process_route !== undefined ? editedParts[part.id].process_route : part.process_route) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.process_route !== undefined ? editedParts[part.id].process_route : part.process_route}
                               onChange={(e) => handleCellChange(part.id, 'process_route', e.target.value)}
                             />
@@ -856,7 +869,8 @@ const MergedParts: React.FC = () => {
                           {editMode ? (
                             <input
                               type="text"
-                              className="w-full px-2 py-1 border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(80, ((editedParts[part.id]?.remark !== undefined ? editedParts[part.id].remark : part.remark) || '').toString().length * 8 + 32)}px`}}
                               value={editedParts[part.id]?.remark !== undefined ? editedParts[part.id].remark : part.remark}
                               onChange={(e) => handleCellChange(part.id, 'remark', e.target.value)}
                             />

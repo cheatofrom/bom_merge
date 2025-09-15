@@ -27,6 +27,7 @@ export interface Project {
   project_name: string;
   upload_batch: string;
   file_unique_id: string;
+  category_id?: number;
 }
 
 // 项目备注类型定义
@@ -45,6 +46,9 @@ export interface MergedProject {
   merged_project_name: string;
   source_projects: string[];
   created_at: string;
+  created_by?: number;
+  creator_name?: string;
+  creator_full_name?: string;
 }
 
 // 合并零部件类型定义
@@ -82,6 +86,26 @@ export interface UploadedFile {
   status: string;
   rows_imported: number;
   error_message?: string;
+  category_id?: number;
+}
+
+// 项目分类类型定义
+export interface Category {
+  id: number;
+  name: string;
+  description?: string;
+  color?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// 项目分类关联类型定义
+export interface ProjectCategory {
+  id: number;
+  project_name: string;
+  file_unique_id: string;
+  category_id: number;
+  created_at: string;
 }
 
 // 文件映射类型定义

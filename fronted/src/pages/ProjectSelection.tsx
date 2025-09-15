@@ -1,10 +1,13 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getProjectNames, getAllProjects, uploadPartsExcel, getProjectNote, saveProjectNote, getUploadedFiles, updateProjectName, deleteProjectByFileId } from '../services/api';
+import { getProjectNames, getAllProjects, getUserProjects, uploadPartsExcel, getProjectNote, saveProjectNote, getUploadedFiles, updateProjectName, deleteProjectByFileId, getUserCategories } from '../services/api';
+import { checkPermission } from '../services/auth';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-import { ProjectNote, Project, UploadedFile, FileMapping } from '../types';
+import { ProjectNote, Project, UploadedFile, FileMapping, Category } from '../types';
+import { useAuth } from '../contexts/AuthContext';
 import ConfirmDialog from '../components/ConfirmDialog';
 import FileMappingInfo from '../components/FileMappingInfo';
+
 
 /**
  * @component ProjectSelection
@@ -51,23 +54,56 @@ const ProjectSelection: React.FC = () => {
   const [editingProjectName, setEditingProjectName] = useState<{oldName: string, newName: string, fileId: string} | null>(null);
   // 项目名称保存状态
   const [savingProjectName, setSavingProjectName] = useState<boolean>(false);
+  // 分页状态
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [itemsPerPage] = useState<number>(10); // 每页显示10条记录
+  // 分类相关状态
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
+  const [loadingCategories, setLoadingCategories] = useState<boolean>(false);
+
+
   // 路由导航hook
   const navigate = useNavigate();
 
+  // 认证相关状态
+  const { isAdmin } = useAuth();
+  const [hasPermission, setHasPermission] = useState<Record<string, boolean>>({});
+
   /**
    * @effect 组件挂载时获取项目列表、项目详细信息和项目备注
-   * @description 在组件挂载后，从API获取所有可用项目名称、详细信息和对应的备注信息
+   * @description 在组件挂载后，根据用户权限获取可访问的项目信息
    */
   useEffect(() => {
     const fetchProjectData = async () => {
       try {
         setLoading(true);
-        // 获取所有项目名称
-        const names = await getProjectNames();
+        setLoadingCategories(true);
+        
+        // 获取用户有权限的分类
+        const categoriesData = await getUserCategories();
+        setCategories(categoriesData);
+        
+        // 如果有分类且当前没有选中分类，自动选中第一个分类
+        if (categoriesData.length > 0 && selectedCategoryId === null) {
+          setSelectedCategoryId(categoriesData[0].id.toString());
+        }
+        
+        let projects: Project[] = [];
+        let names: string[] = [];
+        
+        if (isAdmin()) {
+          // 管理员可以访问所有项目
+          names = await getProjectNames();
+          projects = await getAllProjects();
+        } else {
+          // 普通用户只能访问有权限的项目
+          projects = await getUserProjects();
+          names = projects.map(project => project.project_name);
+        }
+        
         setProjectNames(names);
         
-        // 获取所有项目详细信息
-        const projects = await getAllProjects();
         const detailsObj: Record<string, Project> = {};
         
         // 将项目详细信息按文件ID组织成对象
@@ -97,17 +133,42 @@ const ProjectSelection: React.FC = () => {
         }
         setProjectNotes(notesObj);
         
+        // 检查删除权限（仅对非管理员用户）
+        if (!isAdmin()) {
+          const permissionsObj: Record<string, boolean> = {};
+          for (const file of files) {
+            try {
+              // 检查分类的编辑权限（用于删除操作）
+              if (file.category_id) {
+                const result = await checkPermission({
+                  resource_type: 'category',
+                  resource_id: file.category_id.toString(),
+                  permission: 'edit'
+                });
+                permissionsObj[`delete_${file.file_unique_id}`] = result.has_permission;
+              } else {
+                // 没有分类的文件默认无删除权限
+                permissionsObj[`delete_${file.file_unique_id}`] = false;
+              }
+            } catch (err) {
+              console.error(`检查项目 ${file.project_name} 删除权限失败:`, err);
+              permissionsObj[`delete_${file.file_unique_id}`] = false;
+            }
+          }
+          setHasPermission(permissionsObj);
+        }
 
       } catch (err) {
         setError('获取项目列表失败，请稍后重试');
         console.error('Error fetching project data:', err);
       } finally {
         setLoading(false);
+        setLoadingCategories(false);
       }
     };
 
     fetchProjectData();
-  }, []);
+  }, [isAdmin, selectedCategoryId]);
 
   /**
    * @function handleProjectToggle
@@ -166,6 +227,8 @@ const ProjectSelection: React.FC = () => {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) return;
 
+    // 所有用户都可以上传文件
+
     // 转换FileList为数组
     const filesArray = Array.from(fileList);
     
@@ -182,8 +245,20 @@ const ProjectSelection: React.FC = () => {
       setError(null);
       setUploadSuccess(null);
       
-      // 调用API上传Excel文件
-      const result = await uploadPartsExcel(filesArray);
+      // 使用当前选中的分类ID
+      const categoryId = selectedCategoryId;
+      
+      // 添加日志记录分类ID的选择和传递
+      console.log('前端上传文件 - 分类信息:', {
+        selectedCategoryId,
+        finalCategoryId: categoryId,
+        parsedCategoryId: categoryId ? parseInt(categoryId as string) : undefined,
+        filesCount: filesArray.length,
+        fileNames: filesArray.map(f => f.name)
+      });
+      
+      // 调用API上传Excel文件，传入分类ID
+      const result = await uploadPartsExcel(filesArray, undefined, categoryId ? parseInt(categoryId as string) : undefined);
       
       // 设置上传结果状态
       setUploadSuccess({
@@ -193,11 +268,21 @@ const ProjectSelection: React.FC = () => {
       });
       
       // 上传成功后重新获取项目列表
-      const names = await getProjectNames();
+      let projects: Project[] = [];
+      let names: string[] = [];
+      
+      if (isAdmin()) {
+        // 管理员可以访问所有项目
+        names = await getProjectNames();
+        projects = await getAllProjects();
+      } else {
+        // 普通用户只能访问有权限的项目
+        projects = await getUserProjects();
+        names = projects.map(project => project.project_name);
+      }
+      
       setProjectNames(names);
       
-      // 获取所有项目详细信息
-      const projects = await getAllProjects();
       const detailsObj: Record<string, Project> = {};
       
       // 将项目详细信息按文件ID组织成对象
@@ -289,8 +374,34 @@ const ProjectSelection: React.FC = () => {
    * @param {string} projectName - 要删除的项目名称
    * @param {React.MouseEvent} e - 点击事件对象
    */
-  const handleShowDeleteConfirm = (fileId: string, projectName: string, e: React.MouseEvent) => {
+  const handleShowDeleteConfirm = async (fileId: string, projectName: string, e: React.MouseEvent) => {
     e.stopPropagation(); // 阻止事件冒泡，避免触发项目选择
+    
+    // 检查删除权限
+     if (!isAdmin()) {
+       try {
+         // 找到对应的文件信息以获取分类ID
+          const file = uploadedFiles.find((f: UploadedFile) => f.file_unique_id === fileId);
+         if (file && file.category_id) {
+           const result = await checkPermission({
+             resource_type: 'category',
+             resource_id: file.category_id.toString(),
+             permission: 'edit'
+           });
+           if (!result.has_permission) {
+             setError('您没有权限删除此项目');
+             return;
+           }
+         } else {
+           setError('无法确定项目分类，无法删除');
+           return;
+         }
+       } catch (err) {
+         setError('检查权限失败，请稍后重试');
+         return;
+       }
+     }
+    
     setConfirmDelete({isOpen: true, fileId, projectName});
   };
 
@@ -358,12 +469,16 @@ const ProjectSelection: React.FC = () => {
   
   /**
    * @function handleCloseFileMappings
-   * @description 关闭文件映射信息显示
+   * @description 关闭文件映射信息对话框
    */
   const handleCloseFileMappings = () => {
     setShowFileMappings(false);
     setSelectedFileId(null);
   };
+
+
+
+
   
   /**
    * @function handleCancelEditNote
@@ -457,16 +572,184 @@ const ProjectSelection: React.FC = () => {
   };
 
   /**
+   * @function getPaginatedFiles
+   * @description 获取当前页的文件列表
+   * @returns {UploadedFile[]} 当前页的文件列表
+   */
+  const getPaginatedFiles = (): UploadedFile[] => {
+    const filteredFiles = getFilteredFiles();
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    const endIndex = startIndex + itemsPerPage;
+    return filteredFiles.slice(startIndex, endIndex);
+  };
+
+  /**
+   * @function getFilteredFiles
+   * @description 根据选中的分类过滤文件
+   * @returns {UploadedFile[]} 过滤后的文件列表
+   */
+  const getFilteredFiles = () => {
+    if (!selectedCategoryId) {
+      return uploadedFiles; // 没有选中分类时显示所有文件
+    }
+    return uploadedFiles.filter(file => file.category_id === parseInt(selectedCategoryId));
+  };
+
+  /**
+   * @function getTotalPages
+   * @description 计算总页数
+   * @returns {number} 总页数
+   */
+  const getTotalPages = () => {
+    const filteredFiles = getFilteredFiles();
+    return Math.ceil(filteredFiles.length / itemsPerPage);
+  };
+
+  /**
+   * @function handlePageChange
+   * @description 处理页码变更
+   * @param {number} page - 目标页码
+   */
+  const handlePageChange = (page: number) => {
+    const totalPages = getTotalPages();
+    if (page >= 1 && page <= totalPages) {
+      setCurrentPage(page);
+    }
+  };
+
+  /**
+   * @function handlePrevPage
+   * @description 处理上一页
+   */
+  const handlePrevPage = () => {
+    if (currentPage > 1) {
+      setCurrentPage(currentPage - 1);
+    }
+  };
+
+  /**
+   * @function handleNextPage
+   * @description 处理下一页
+   */
+  const handleNextPage = () => {
+    const totalPages = getTotalPages();
+    if (currentPage < totalPages) {
+      setCurrentPage(currentPage + 1);
+    }
+  };
+
+  /**
    * @returns {JSX.Element} 渲染项目选择页面的UI组件
    */
   return (
-    <div className="container mx-auto p-6 max-w-7xl">
-      {/* 页面标题和操作按钮区域 */}
-      <div className="flex justify-between items-center mb-6">
+    <div className="flex h-screen bg-gray-50">
+      {/* 左侧分类导航栏 */}
+      <div className="w-64 bg-white shadow-lg border-r border-gray-200 flex flex-col">
+        <div className="p-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-800">项目分类</h2>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto">
+          {loadingCategories ? (
+            <div className="flex justify-center items-center py-8">
+              <div className="animate-spin rounded-full h-6 w-6 border-t-2 border-b-2 border-blue-500"></div>
+              <span className="ml-2 text-sm text-gray-600">加载分类中...</span>
+            </div>
+          ) : (
+            <div className="p-2">
+              {/* 分类列表 */}
+              {categories.map(category => {
+                const categoryFileCount = uploadedFiles.filter(file => file.category_id === category.id).length;
+                return (
+                  <button
+                    key={category.id}
+                    onClick={() => {
+                      setSelectedCategoryId(category.id.toString());
+                      setCurrentPage(1);
+                    }}
+                    className={`w-full text-left px-3 py-2 rounded-md mb-1 transition-colors duration-200 ${
+                      selectedCategoryId === category.id.toString()
+                        ? 'bg-blue-100 text-blue-700 border border-blue-300'
+                        : 'text-gray-700 hover:bg-gray-100'
+                    }`}
+                  >
+                    <div className="flex items-center">
+                      <div 
+                        className="w-3 h-3 rounded-full mr-2" 
+                        style={{ backgroundColor: category.color || '#6B7280' }}
+                      ></div>
+                      <span className="font-medium truncate">{category.name}</span>
+                      <span className="ml-auto text-xs bg-gray-200 text-gray-600 px-2 py-1 rounded-full">
+                        {categoryFileCount}
+                      </span>
+                    </div>
+                    {category.description && (
+                      <div className="text-xs text-gray-500 mt-1 ml-5 truncate">
+                        {category.description}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
+              
+              {categories.length === 0 && !loadingCategories && (
+                <div className="text-center py-8 text-gray-500">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mx-auto mb-2 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                  </svg>
+                  <div className="text-sm">暂无分类</div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+      
+      {/* 右侧主要内容区域 */}
+       <div className="flex-1 flex flex-col overflow-hidden">
+         <div className="bg-white border-b border-gray-200 p-6">
+           {/* 页面标题和操作按钮区域 */}
+           <div className="flex justify-between items-start mb-6">
         <div>
           <h1 className="text-3xl font-bold text-blue-700 mb-2">零部件库管理系统</h1>
           <h2 className="text-xl text-gray-600 border-b pb-2">选择项目进行合并查看</h2>
         </div>
+        
+        {/* 已选项目显示区域 */}
+        <div className="flex-1 mx-8">
+          {selectedFileIds.length > 0 && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div className="flex items-center mb-2">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-blue-600 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M3 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 4a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1z" clipRule="evenodd" />
+                </svg>
+                <span className="text-sm font-medium text-blue-700">已选择 {selectedFileIds.length} 个项目：</span>
+              </div>
+              <div className="max-h-32 overflow-y-auto">
+                <div className="space-y-1">
+                  {selectedFileIds.map(fileId => {
+                    const file = uploadedFiles.find(f => f.file_unique_id === fileId);
+                    return file ? (
+                      <div key={fileId} className="flex items-center justify-between bg-white rounded px-3 py-2 text-sm">
+                        <span className="text-gray-700 font-medium">{file.project_name}</span>
+                        <button
+                          onClick={() => handleProjectToggle(fileId)}
+                          className="text-red-500 hover:text-red-700 ml-2"
+                          title="移除选择"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                          </svg>
+                        </button>
+                      </div>
+                    ) : null;
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        
         {/* 操作按钮区域：合并项目和上传Excel文件 */}
         <div className="flex items-center space-x-4">
           {/* 合并选中项目按钮 */}
@@ -480,17 +763,7 @@ const ProjectSelection: React.FC = () => {
             </svg>
             合并选中项目
           </button>
-          {/* 查看已保存的合并项目按钮 */}
-          <button
-            onClick={() => navigate('/merged-projects')}
-            className="px-6 py-3 rounded-lg shadow-md font-medium text-lg flex items-center transition-all duration-200 bg-purple-600 text-white hover:bg-purple-700 hover:shadow-lg"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M7 3a1 1 0 000 2h6a1 1 0 100-2H7zM4 7a1 1 0 011-1h10a1 1 0 110 2H5a1 1 0 01-1-1zM2 11a2 2 0 012-2h12a2 2 0 012 2v4a2 2 0 01-2 2H4a2 2 0 01-2-2v-4z" />
-            </svg>
-            已保存的合并项目
-          </button>
-          {/* 上传Excel文件按钮 */}
+          {/* 上传Excel文件区域 - 所有用户可见 */}
           <button
             onClick={handleUploadClick}
             disabled={uploading}
@@ -499,7 +772,7 @@ const ProjectSelection: React.FC = () => {
             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
             </svg>
-            {uploading ? '上传中...' : '上传Excel文件（可多选）'}
+            {uploading ? '上传中...' : selectedCategoryId ? `上传到 ${categories.find(c => c.id.toString() === selectedCategoryId)?.name || '当前分类'}` : '上传Excel文件（可多选）'}
           </button>
         </div>
         {/* 隐藏的文件上传输入框，通过按钮触发点击 */}
@@ -513,60 +786,64 @@ const ProjectSelection: React.FC = () => {
         />
       </div>
       
-      {/* 错误提示区域，仅在有错误时显示 */}
-      {error && (
-        <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded-md shadow-md mb-6 flex items-center">
-          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <span className="font-medium">{error}</span>
-        </div>
-      )}
-      
-      {/* 上传结果提示区域，仅在上传完成后显示 */}
-      {uploadSuccess && (
-        <div className={`p-4 rounded-md shadow-md mb-6 border-l-4 ${uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? 'bg-green-50 border-green-500 text-green-700' : uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? 'bg-yellow-50 border-yellow-500 text-yellow-700' : 'bg-red-50 border-red-500 text-red-700'}`}>
-          {/* 上传状态图标和文字提示 */}
-          <div className="flex items-center">
-            {uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-              </svg>
-            ) : uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-              </svg>
-            ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            )}
-            <span className="font-medium">
-              {uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? 'Excel文件上传成功！' : 
-               uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? '部分Excel文件上传成功！' : 
-               'Excel文件上传失败！'}
-              {(uploadSuccess.status !== 'error' && uploadSuccess.status !== 'failed') && `已导入 ${uploadSuccess.rows} 条数据。`}
-            </span>
           </div>
           
-          {/* 上传详细信息列表，显示每个文件的上传结果 */}
-          {uploadSuccess.details && uploadSuccess.details.length > 0 && (
-            <div className="mt-3 ml-9">
-              <p className="font-medium mb-1">详细信息：</p>
-              <ul className="list-disc list-inside space-y-1">
-                {uploadSuccess.details.map((detail, index) => (
-                  <li key={index} className={detail.status === 'imported' ? 'text-green-600' : 'text-red-600'}>
-                    {detail.filename} ({detail.project_name}): 
-                    {detail.status === 'imported' 
-                      ? `成功导入 ${detail.rows_imported} 条记录，文件ID: ${detail.file_id.substring(0, 8)}...` 
-                      : `导入失败 - ${detail.error || '未知错误'}`}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
+          {/* 主要内容滚动区域 */}
+          <div className="flex-1 overflow-y-auto p-6">
+            {/* 错误提示区域，仅在有错误时显示 */}
+             {error && (
+               <div className="bg-red-50 border-l-4 border-red-500 text-red-700 p-4 rounded-md shadow-md mb-6 flex items-center">
+                 <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                 </svg>
+                 <span className="font-medium">{error}</span>
+               </div>
+             )}
+              
+              {/* 上传结果提示区域，仅在上传完成后显示 */}
+              {uploadSuccess && (
+                 <div className={`p-4 rounded-md shadow-md mb-6 border-l-4 ${uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? 'bg-green-50 border-green-500 text-green-700' : uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? 'bg-yellow-50 border-yellow-500 text-yellow-700' : 'bg-red-50 border-red-500 text-red-700'}`}>
+                   {/* 上传状态图标和文字提示 */}
+                   <div className="flex items-center">
+                     {uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? (
+                       <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                       </svg>
+                     ) : uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? (
+                       <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                       </svg>
+                     ) : (
+                       <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                       </svg>
+                     )}
+                     <span className="font-medium">
+                       {uploadSuccess.status === 'success' || uploadSuccess.status === 'imported' ? 'Excel文件上传成功！' : 
+                        uploadSuccess.status === 'partial_success' || uploadSuccess.status === 'partial' ? '部分Excel文件上传成功！' : 
+                        'Excel文件上传失败！'}
+                       {(uploadSuccess.status !== 'error' && uploadSuccess.status !== 'failed') && `已导入 ${uploadSuccess.rows} 条数据。`}
+                     </span>
+                   </div>
+                   
+                   {/* 上传详细信息列表，显示每个文件的上传结果 */}
+                   {uploadSuccess.details && uploadSuccess.details.length > 0 && (
+                     <div className="mt-3 ml-9">
+                       <p className="font-medium mb-1">详细信息：</p>
+                       <ul className="list-disc list-inside space-y-1">
+                         {uploadSuccess.details.map((detail, index) => (
+                           <li key={index} className={detail.status === 'imported' ? 'text-green-600' : 'text-red-600'}>
+                             {detail.filename} ({detail.project_name}): 
+                             {detail.status === 'imported' 
+                               ? `成功导入 ${detail.rows_imported} 条记录，文件ID: ${detail.file_id.substring(0, 8)}...` 
+                               : `导入失败 - ${detail.error || '未知错误'}`}
+                           </li>
+                         ))}
+                       </ul>
+                     </div>
+                   )}
+                 </div>
+               )}
       
       {/* 加载状态显示或项目列表内容 */}
       {loading || uploading ? (
@@ -579,29 +856,38 @@ const ProjectSelection: React.FC = () => {
         <div>
           <div className="mb-4">
             {/* 根据是否有项目显示不同内容 */}
-            {uploadedFiles.length === 0 ? (
+            {getFilteredFiles().length === 0 ? (
               /* 无项目时显示空状态提示 */
               <div className="flex flex-col items-center justify-center py-16 bg-gray-50 rounded-lg border border-gray-200">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-16 w-16 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                <div className="text-gray-500 text-xl font-medium">没有可用的项目</div>
-                <div className="text-gray-400 mt-2">请点击右上角的"上传Excel文件"按钮上传项目数据</div>
-                <button
-                  onClick={handleUploadClick}
-                  className="mt-6 px-6 py-2 bg-green-600 text-white rounded-lg shadow-md hover:bg-green-700 transition-colors duration-200 flex items-center font-medium"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                  </svg>
-                  上传Excel文件
-                </button>
+                <div className="text-gray-500 text-xl font-medium">
+                  {uploadedFiles.length === 0 ? '没有可用的项目' : '该分类下没有项目'}
+                </div>
+                <div className="text-gray-400 mt-2">
+                  {uploadedFiles.length === 0 
+                    ? '请点击右上角的"上传Excel文件"按钮上传项目数据' 
+                    : selectedCategoryId ? '请选择其他分类或上传新项目到此分类' : '请选择其他分类查看项目'
+                  }
+                </div>
+                {uploadedFiles.length === 0 && isAdmin() && (
+                  <button
+                    onClick={handleUploadClick}
+                    className="mt-6 px-6 py-2 bg-green-600 text-white rounded-lg shadow-md hover:bg-green-700 transition-colors duration-200 flex items-center font-medium"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                      <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                    </svg>
+                    上传Excel文件
+                  </button>
+                )}
               </div>
             ) : (
               /* 有项目时显示项目卡片网格 */
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {/* 遍历所有上传文件，为每个文件创建卡片 */}
-                {uploadedFiles.map(file => (
+                {/* 遍历筛选后的文件，为每个文件创建卡片 */}
+                {getFilteredFiles().map(file => (
                   <div 
                     key={file.file_unique_id}
                     className={`border p-5 rounded-lg shadow-md transition-all duration-200 hover:shadow-lg ${selectedFileIds.includes(file.file_unique_id) ? 'bg-blue-50 border-blue-500' : 'hover:border-gray-300'}`}
@@ -680,23 +966,25 @@ const ProjectSelection: React.FC = () => {
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                                 </svg>
                               </button>
-                              {/* 删除按钮 */}
-                              <button
-                                onClick={(e) => handleShowDeleteConfirm(file.file_unique_id, file.project_name, e)}
-                                className="p-1.5 text-red-500 hover:bg-red-50 rounded-full transition-colors"
-                                disabled={deleting}
-                              >
-                                {deleting && confirmDelete.fileId === file.file_unique_id ? (
-                                  <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                  </svg>
-                                ) : (
-                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                  </svg>
-                                )}
-                              </button>
+                              {/* 删除按钮 - 仅管理员或有删除权限的用户可见 */}
+                              {(isAdmin() || hasPermission[`delete_${file.file_unique_id}`]) && (
+                                <button
+                                  onClick={(e) => handleShowDeleteConfirm(file.file_unique_id, file.project_name, e)}
+                                  className="p-1.5 text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                                  disabled={deleting}
+                                >
+                                  {deleting && confirmDelete.fileId === file.file_unique_id ? (
+                                    <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                  ) : (
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                  )}
+                                </button>
+                              )}
                             </>
                           )}
                         </div>
@@ -792,7 +1080,14 @@ const ProjectSelection: React.FC = () => {
           
           {/* 上传文件历史记录 */}
           <div className="mt-10">
-            <h2 className="text-xl font-semibold mb-4">上传文件历史记录</h2>
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-semibold">上传文件历史记录</h2>
+              {uploadedFiles.length > 0 && (
+                <div className="text-sm text-gray-500">
+                  共 {uploadedFiles.length} 条记录，每页显示 {itemsPerPage} 条
+                </div>
+              )}
+            </div>
             {loadingFiles ? (
               <div className="flex justify-center items-center py-8">
                 <svg className="animate-spin h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -804,50 +1099,150 @@ const ProjectSelection: React.FC = () => {
             ) : uploadedFiles.length === 0 ? (
               <div className="text-center py-8 text-gray-500">暂无上传文件记录</div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full bg-white border border-gray-200 rounded-lg overflow-hidden">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">文件名</th>
-                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">项目名称</th>
-                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">文件大小</th>
-                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">上传时间</th>
-                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
-                      <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">导入行数/操作</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-200">
-                    {uploadedFiles.map((file) => (
-                      <tr key={file.file_unique_id} className="hover:bg-gray-50">
-                        <td className="py-3 px-4 text-sm text-gray-900">{file.original_filename}</td>
-                        <td className="py-3 px-4 text-sm text-gray-900">{file.project_name}</td>
-                        <td className="py-3 px-4 text-sm text-gray-500">{formatFileSize(file.file_size)}</td>
-                        <td className="py-3 px-4 text-sm text-gray-500">{new Date(file.upload_time).toLocaleString()}</td>
-                        <td className="py-3 px-4 text-sm">
-                          <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${file.status === 'imported' ? 'bg-green-100 text-green-800' : file.status === 'partial' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
-                            {file.status === 'imported' ? '成功' : file.status === 'partial' ? '部分成功' : '失败'}
-                          </span>
-                        </td>
-                        <td className="py-3 px-4 text-sm text-gray-500">
-                          <div className="flex items-center">
-                            <span>{file.rows_imported}</span>
-                            {file.status === 'imported' && (
-                              <button 
-                                onClick={(e) => handleViewFileMappings(file.file_unique_id, e)}
-                                className="ml-2 text-blue-500 hover:text-blue-700"
-                                title="查看文件映射信息"
-                              >
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                              </button>
-                            )}
-                          </div>
-                        </td>
+              <div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full bg-white border border-gray-200 rounded-lg overflow-hidden">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">文件名</th>
+                        <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">项目名称</th>
+                        <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">文件大小</th>
+                        <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">上传时间</th>
+                        <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">状态</th>
+                        <th className="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">导入行数/操作</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {getPaginatedFiles().map((file) => (
+                        <tr key={file.file_unique_id} className="hover:bg-gray-50">
+                          <td className="py-3 px-4 text-sm text-gray-900">{file.original_filename}</td>
+                          <td className="py-3 px-4 text-sm text-gray-900">{file.project_name}</td>
+                          <td className="py-3 px-4 text-sm text-gray-500">{formatFileSize(file.file_size)}</td>
+                          <td className="py-3 px-4 text-sm text-gray-500">{new Date(file.upload_time).toLocaleString()}</td>
+                          <td className="py-3 px-4 text-sm">
+                            <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${file.status === 'imported' ? 'bg-green-100 text-green-800' : file.status === 'partial' ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
+                              {file.status === 'imported' ? '成功' : file.status === 'partial' ? '部分成功' : '失败'}
+                            </span>
+                          </td>
+                          <td className="py-3 px-4 text-sm text-gray-500">
+                            <div className="flex items-center">
+                              <span>{file.rows_imported}</span>
+                              {file.status === 'imported' && (
+                                <button 
+                                  onClick={(e) => handleViewFileMappings(file.file_unique_id, e)}
+                                  className="ml-2 text-blue-500 hover:text-blue-700"
+                                  title="查看文件映射信息"
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                  </svg>
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                
+                {/* 分页控件 */}
+                {getTotalPages() > 1 && (
+                  <div className="flex items-center justify-between mt-4 px-4 py-3 bg-white border border-gray-200 rounded-lg">
+                    <div className="flex items-center text-sm text-gray-700">
+                      <span>
+                        显示第 {(currentPage - 1) * itemsPerPage + 1} - {Math.min(currentPage * itemsPerPage, uploadedFiles.length)} 条，
+                        共 {uploadedFiles.length} 条记录
+                      </span>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      {/* 上一页按钮 */}
+                      <button
+                        onClick={handlePrevPage}
+                        disabled={currentPage === 1}
+                        className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                          currentPage === 1
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        上一页
+                      </button>
+                      
+                      {/* 页码按钮 */}
+                      <div className="flex items-center space-x-1">
+                        {Array.from({ length: getTotalPages() }, (_, i) => i + 1).map((page) => {
+                          // 只显示当前页附近的页码
+                          const totalPages = getTotalPages();
+                          if (
+                            page === 1 ||
+                            page === totalPages ||
+                            (page >= currentPage - 2 && page <= currentPage + 2)
+                          ) {
+                            return (
+                              <button
+                                key={page}
+                                onClick={() => handlePageChange(page)}
+                                className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                                  page === currentPage
+                                    ? 'bg-blue-500 text-white'
+                                    : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                                }`}
+                              >
+                                {page}
+                              </button>
+                            );
+                          } else if (
+                            (page === currentPage - 3 && currentPage > 4) ||
+                            (page === currentPage + 3 && currentPage < totalPages - 3)
+                          ) {
+                            return (
+                              <span key={page} className="px-2 py-1 text-gray-400">
+                                ...
+                              </span>
+                            );
+                          }
+                          return null;
+                        })}
+                      </div>
+                      
+                      {/* 下一页按钮 */}
+                      <button
+                        onClick={handleNextPage}
+                        disabled={currentPage === getTotalPages()}
+                        className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
+                          currentPage === getTotalPages()
+                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                            : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
+                        }`}
+                      >
+                        下一页
+                      </button>
+                      
+                      {/* 页码跳转 */}
+                      <div className="flex items-center ml-4">
+                        <span className="text-sm text-gray-700 mr-2">跳转到</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max={getTotalPages()}
+                          className="w-16 px-2 py-1 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                          onKeyPress={(e) => {
+                            if (e.key === 'Enter') {
+                              const page = parseInt((e.target as HTMLInputElement).value);
+                              if (page >= 1 && page <= getTotalPages()) {
+                                handlePageChange(page);
+                                (e.target as HTMLInputElement).value = '';
+                              }
+                            }
+                          }}
+                          placeholder={currentPage.toString()}
+                        />
+                        <span className="text-sm text-gray-700 ml-2">页</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -855,6 +1250,8 @@ const ProjectSelection: React.FC = () => {
           {/* 合并按钮已移至页面顶部 */}
         </div>
       )}
+        </div>
+      </div>
 
       {/* 确认删除对话框 */}
       <ConfirmDialog
@@ -888,6 +1285,8 @@ const ProjectSelection: React.FC = () => {
           </div>
         </div>
       )}
+      
+
     </div>
   );
 }

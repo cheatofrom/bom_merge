@@ -1,5 +1,6 @@
 import axios from 'axios';
-import { Part, Project, ProjectNote, MergedProject, MergedPart, UploadedFile, FileMapping } from '../types';
+import { Part, Project, ProjectNote, MergedProject, MergedPart, UploadedFile, FileMapping, Category, ProjectCategory } from '../types';
+import authApi from './auth';
 
 // 设置基础URL，确保与后端API端口一致
 const API_BASE_URL = 'http://192.168.1.66:8596';
@@ -20,6 +21,12 @@ export const getAllProjects = async (): Promise<Project[]> => {
   return response.data;
 };
 
+// 获取用户有权限的项目
+export const getUserProjects = async (): Promise<Project[]> => {
+  const response = await authApi.get<Project[]>('/user-projects');
+  return response.data;
+};
+
 // 获取零部件
 export const getParts = async (projectName?: string): Promise<Part[]> => {
   const url = projectName ? `/parts?project_name=${projectName}` : '/parts';
@@ -35,13 +42,22 @@ export const mergeParts = async (projectNames: string[]): Promise<Part[]> => {
 
 // 合并多个项目的零部件（通过文件唯一ID）
 export const mergePartsByFileIds = async (fileUniqueIds: string[]): Promise<Part[]> => {
-  const response = await api.post<Part[]>('/merge_parts_by_file_ids', { file_unique_ids: fileUniqueIds });
+  const response = await api.post<Part[]>('/merge_parts_by_file_ids', { file_ids: fileUniqueIds });
   return response.data;
 };
 
 // 上传Excel文件
-export const uploadPartsExcel = async (files: File[], projectName?: string): Promise<{status: string, rows_imported: number, details?: {filename: string, project_name: string, file_id: string, status: string, rows_imported?: number, error?: string}[]}> => {
+export const uploadPartsExcel = async (files: File[], projectName?: string, categoryId?: number): Promise<{status: string, rows_imported: number, details?: {filename: string, project_name: string, file_id: string, status: string, rows_imported?: number, error?: string}[]}> => {
   const formData = new FormData();
+  
+  // 添加日志记录API调用参数
+  console.log('API uploadPartsExcel 调用参数:', {
+    filesCount: files.length,
+    fileNames: files.map(f => f.name),
+    projectName,
+    categoryId,
+    categoryIdType: typeof categoryId
+  });
   
   // 添加多个文件
   files.forEach(file => {
@@ -52,12 +68,20 @@ export const uploadPartsExcel = async (files: File[], projectName?: string): Pro
     formData.append('project_name', projectName);
   }
   
+  if (categoryId !== undefined) {
+    formData.append('category_id', categoryId.toString());
+    console.log('FormData中添加category_id:', categoryId.toString());
+  } else {
+    console.log('categoryId为undefined，未添加到FormData');
+  }
+  
   const response = await api.post<{status: string, rows_imported: number, details?: {filename: string, project_name: string, file_id: string, status: string, rows_imported?: number, error?: string}[]}>('/upload_parts_excel', formData, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
   });
   
+  console.log('API uploadPartsExcel 响应:', response.data);
   return response.data;
 };
 
@@ -157,7 +181,7 @@ export const updateParts = async (parts: Partial<Part>[]): Promise<{status: stri
 
 // 保存合并项目
 export const saveMergedProject = async (mergedProjectName: string, sourceProjects: string[], parts: Part[], sourceFileIds?: string[]): Promise<{status: string, merged_project_id: number, message: string}> => {
-  const response = await api.post<{status: string, merged_project_id: number, message: string}>('/save-merged-project', {
+  const response = await authApi.post<{status: string, merged_project_id: number, message: string}>('/save-merged-project', {
     merged_project_name: mergedProjectName,
     source_projects: sourceProjects,
     source_file_ids: sourceFileIds,
@@ -168,32 +192,32 @@ export const saveMergedProject = async (mergedProjectName: string, sourceProject
 
 // 获取所有合并项目
 export const getMergedProjects = async (): Promise<MergedProject[]> => {
-  const response = await api.get<MergedProject[]>('/merged-projects');
+  const response = await authApi.get<MergedProject[]>('/merged-projects');
   return response.data;
 };
 
 // 获取合并项目的零部件
 export const getMergedProjectParts = async (mergedProjectId: number): Promise<{parts: MergedPart[], project: MergedProject}> => {
-  const response = await api.get<{parts: MergedPart[], project: MergedProject}>(`/merged-project-parts/${mergedProjectId}`);
+  const response = await authApi.get<{parts: MergedPart[], project: MergedProject}>(`/merged-project-parts/${mergedProjectId}`);
   return response.data;
 };
 
 // 删除合并项目
 export const deleteMergedProject = async (mergedProjectId: number): Promise<{status: string, message: string}> => {
-  const response = await api.delete<{status: string, message: string}>(`/merged-projects/${mergedProjectId}`);
+  const response = await authApi.delete<{status: string, message: string}>(`/merged-projects/${mergedProjectId}`);
   return response.data;
 };
 
 // 删除合并项目中的零部件
 export const deleteMergedPart = async (partId: number): Promise<{status: string, message: string}> => {
-  const response = await api.delete<{status: string, message: string}>(`/merged-parts/${partId}`);
+  const response = await authApi.delete<{status: string, message: string}>(`/merged-parts/${partId}`);
   return response.data;
 };
 
 // 导出合并项目为Excel
 export const exportMergedProject = async (mergedProjectId: number, projectName?: string): Promise<Blob> => {
   try {
-    const response = await api.get(`/export-merged-project/${mergedProjectId}`, {
+    const response = await authApi.get(`/export-merged-project/${mergedProjectId}`, {
       responseType: 'blob'
     });
     
@@ -248,4 +272,68 @@ export const deleteProject = async (projectName: string): Promise<{status: strin
 export const deleteProjectByFileId = async (fileUniqueId: string): Promise<{status: string, message: string}> => {
   const response = await api.delete<{status: string, message: string}>(`/uploaded_files/${fileUniqueId}`);
   return response.data;
+};
+
+// ==================== 分类管理 API ====================
+
+// 获取所有分类
+export const getAllCategories = async (): Promise<Category[]> => {
+  const response = await api.get<Category[]>('/categories');
+  return response.data;
+};
+
+// 获取用户有权限的分类
+export const getUserCategories = async (): Promise<Category[]> => {
+  const response = await authApi.get<Category[]>('/user-categories');
+  return response.data;
+};
+
+// 根据ID获取分类
+export const getCategoryById = async (categoryId: number): Promise<Category> => {
+  const response = await api.get<Category>(`/categories/${categoryId}`);
+  return response.data;
+};
+
+// 创建新分类
+export const createCategory = async (category: Omit<Category, 'id' | 'created_at' | 'updated_at'>): Promise<Category> => {
+  const response = await api.post<Category>('/categories', category);
+  return response.data;
+};
+
+// 更新分类
+export const updateCategory = async (categoryId: number, category: Partial<Omit<Category, 'id' | 'created_at' | 'updated_at'>>): Promise<Category> => {
+  const response = await api.put<Category>(`/categories/${categoryId}`, category);
+  return response.data;
+};
+
+// 删除分类
+export const deleteCategory = async (categoryId: number): Promise<{status: string, message: string}> => {
+  const response = await api.delete<{status: string, message: string}>(`/categories/${categoryId}`);
+  return response.data;
+};
+
+// 将项目分配到分类
+export const assignProjectToCategory = async (projectName: string, categoryId: number): Promise<ProjectCategory> => {
+  const response = await api.post<ProjectCategory>('/project_categories', {
+    project_name: projectName,
+    category_id: categoryId
+  });
+  return response.data;
+};
+
+// 获取指定分类下的所有项目
+export const getProjectsByCategory = async (categoryId: number): Promise<string[]> => {
+  const response = await api.get<string[]>(`/categories/${categoryId}/projects`);
+  return response.data;
+};
+
+// 更新项目分类（通过文件唯一ID）
+export const updateProjectCategory = async (fileUniqueId: string, categoryId: number): Promise<{status: string, message: string, file: UploadedFile}> => {
+  const response = await api.put<{status: string, message: string, file: UploadedFile}>(`/uploaded_files/${fileUniqueId}/category?category_id=${categoryId}`);
+  return response.data;
+};
+
+// 获取所有分类（别名函数，保持向后兼容）
+export const getCategories = async (): Promise<Category[]> => {
+  return getAllCategories();
 };

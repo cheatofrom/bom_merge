@@ -227,7 +227,7 @@ const MergedProjectParts: React.FC = () => {
   };
 
   return (
-    <div className="w-full p-6" style={{ maxWidth: '100%' }}>
+    <div className="w-full min-h-screen bg-gray-50 py-6">
       {/* 确认删除对话框 */}
       <ConfirmDialog
         isOpen={confirmDelete.isOpen}
@@ -239,8 +239,10 @@ const MergedProjectParts: React.FC = () => {
         onCancel={handleCancelDelete}
       />
       
-      {/* 页面标题和操作按钮区域 */}
-      <div className="flex justify-between items-center mb-6">
+      {/* 页面内容容器 */}
+      <div className="px-4 sm:px-6 lg:px-8">
+        {/* 页面标题和操作按钮区域 */}
+        <div className="flex justify-between items-center mb-6">
         <div>
           <h1 className="text-3xl font-bold text-blue-700 mb-2">零部件库管理系统</h1>
           <h2 className="text-xl text-gray-600 border-b pb-2">
@@ -340,7 +342,7 @@ const MergedProjectParts: React.FC = () => {
       ) : (
         <div>
           {/* 零部件表格 */}
-          <div className="overflow-x-auto bg-white rounded-lg shadow" style={{ maxHeight: '70vh', width: '100%', overflowX: 'auto' }}>
+          <div className="overflow-x-auto bg-white rounded-lg shadow -mx-4 sm:-mx-6 lg:-mx-8" style={{ maxHeight: '70vh', width: '100%', maxWidth: '100vw' }}>
             <table className="w-full divide-y divide-gray-200" style={{ tableLayout: 'auto', minWidth: '1500px' }}>
               <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr className="bg-gray-50">
@@ -471,6 +473,7 @@ const MergedProjectParts: React.FC = () => {
           )}
         </div>
       )}
+      </div>
     </div>
   );
 };

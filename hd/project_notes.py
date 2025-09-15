@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from db import get_connection
+from db import get_connection, get_async_db_connection
 from typing import Optional, List
 
 router = APIRouter()
@@ -22,26 +22,22 @@ class ProjectNoteResponse(BaseModel):
 async def get_project_notes():
     """获取所有项目备注"""
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, project_name, file_unique_id, note, created_at, updated_at
-            FROM project_notes
-            ORDER BY updated_at DESC
-        """)
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        async with get_async_db_connection() as conn:
+            rows = await conn.fetch("""
+                SELECT id, project_name, file_unique_id, note, created_at, updated_at
+                FROM project_notes
+                ORDER BY updated_at DESC
+            """)
         
         result = []
         for row in rows:
             result.append({
-                "id": row[0],
-                "project_name": row[1],
-                "file_unique_id": row[2],
-                "note": row[3],
-                "created_at": row[4].isoformat() if row[4] else None,
-                "updated_at": row[5].isoformat() if row[5] else None
+                "id": row['id'],
+                "project_name": row['project_name'],
+                "file_unique_id": row['file_unique_id'],
+                "note": row['note'],
+                "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+                "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None
             })
         return result
     except Exception as e:
@@ -86,29 +82,25 @@ async def get_project_note_by_name(project_name: str):
 async def get_project_note_internal(project_name: str):
     """内部函数：获取指定项目的备注"""
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, project_name, file_unique_id, note, created_at, updated_at
-            FROM project_notes
-            WHERE project_name = %s
-        """, (project_name,))
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
+        async with get_async_db_connection() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, project_name, file_unique_id, note, created_at, updated_at
+                FROM project_notes
+                WHERE project_name = $1
+            """, project_name)
         
         if not row:
             return {"id": 0, "project_name": project_name, "file_unique_id": None, "note": "", "created_at": None, "updated_at": None}
         
         # 确保日期时间字段正确处理
-        created_at = row[4].isoformat() if row[4] else None
-        updated_at = row[5].isoformat() if row[5] else None
+        created_at = row['created_at'].isoformat() if row['created_at'] else None
+        updated_at = row['updated_at'].isoformat() if row['updated_at'] else None
         
         return {
-            "id": row[0],
-            "project_name": row[1],
-            "file_unique_id": row[2],
-            "note": row[3],
+            "id": row['id'],
+            "project_name": row['project_name'],
+            "file_unique_id": row['file_unique_id'],
+            "note": row['note'],
             "created_at": created_at,
             "updated_at": updated_at
         }
@@ -123,56 +115,48 @@ async def get_project_note_internal(project_name: str):
 async def create_or_update_project_note(note: ProjectNote):
     """创建或更新项目备注"""
     try:
-        conn = get_connection()
-        cur = conn.cursor()
-        
-        # 检查是否已存在该项目的备注
-        if note.file_unique_id:
-            cur.execute("""
-                SELECT id FROM project_notes WHERE file_unique_id = %s
-            """, (note.file_unique_id,))
-        else:
-            cur.execute("""
-                SELECT id FROM project_notes WHERE project_name = %s
-            """, (note.project_name,))
-        existing = cur.fetchone()
-        
-        if existing:
-            # 更新现有备注
+        async with get_async_db_connection() as conn:
+            # 检查是否已存在该项目的备注
             if note.file_unique_id:
-                cur.execute("""
-                    UPDATE project_notes
-                    SET note = %s, updated_at = NOW()
-                    WHERE file_unique_id = %s
-                    RETURNING id, project_name, file_unique_id, note, created_at, updated_at
-                """, (note.note, note.file_unique_id))
+                existing = await conn.fetchrow("""
+                    SELECT id FROM project_notes WHERE file_unique_id = $1
+                """, note.file_unique_id)
             else:
-                cur.execute("""
-                    UPDATE project_notes
-                    SET note = %s, updated_at = NOW()
-                    WHERE project_name = %s
+                existing = await conn.fetchrow("""
+                    SELECT id FROM project_notes WHERE project_name = $1
+                """, note.project_name)
+            
+            if existing:
+                # 更新现有备注
+                if note.file_unique_id:
+                    row = await conn.fetchrow("""
+                        UPDATE project_notes
+                        SET note = $1, updated_at = NOW()
+                        WHERE file_unique_id = $2
+                        RETURNING id, project_name, file_unique_id, note, created_at, updated_at
+                    """, note.note, note.file_unique_id)
+                else:
+                    row = await conn.fetchrow("""
+                        UPDATE project_notes
+                        SET note = $1, updated_at = NOW()
+                        WHERE project_name = $2
+                        RETURNING id, project_name, file_unique_id, note, created_at, updated_at
+                    """, note.note, note.project_name)
+            else:
+                # 创建新备注
+                row = await conn.fetchrow("""
+                    INSERT INTO project_notes (project_name, file_unique_id, note)
+                    VALUES ($1, $2, $3)
                     RETURNING id, project_name, file_unique_id, note, created_at, updated_at
-                """, (note.note, note.project_name))
-        else:
-            # 创建新备注
-            cur.execute("""
-                INSERT INTO project_notes (project_name, file_unique_id, note)
-                VALUES (%s, %s, %s)
-                RETURNING id, project_name, file_unique_id, note, created_at, updated_at
-            """, (note.project_name, note.file_unique_id, note.note))
-        
-        row = cur.fetchone()
-        conn.commit()
-        cur.close()
-        conn.close()
+                """, note.project_name, note.file_unique_id, note.note)
         
         return {
-            "id": row[0],
-            "project_name": row[1],
-            "file_unique_id": row[2],
-            "note": row[3],
-            "created_at": row[4].isoformat() if row[4] else None,
-            "updated_at": row[5].isoformat() if row[5] else None
+            "id": row['id'],
+            "project_name": row['project_name'],
+            "file_unique_id": row['file_unique_id'],
+            "note": row['note'],
+            "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+            "updated_at": row['updated_at'].isoformat() if row['updated_at'] else None
         }
     except Exception as e:
         # 记录详细的错误信息

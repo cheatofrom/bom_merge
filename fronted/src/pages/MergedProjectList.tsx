@@ -232,6 +232,14 @@ const MergedProjectList: React.FC = () => {
                         <h3 className="text-xl font-semibold text-blue-700">{project.merged_project_name}</h3>
                         <div className="mt-2 text-sm text-gray-600">
                           <div><span className="font-medium">创建时间:</span> {new Date(project.created_at).toLocaleString()}</div>
+                          {project.creator_name && (
+                            <div className="mt-1">
+                              <span className="font-medium">创建人:</span> 
+                              <span className="text-gray-800">
+                                {project.creator_full_name || project.creator_name}
+                              </span>
+                            </div>
+                          )}
                           <div className="mt-1">
                             <span className="font-medium">源项目:</span> 
                             <div className="ml-2 mt-1">
