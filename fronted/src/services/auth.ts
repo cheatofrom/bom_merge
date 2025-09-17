@@ -1,7 +1,16 @@
 import axios from 'axios';
 
-// 设置基础URL，确保与后端API端口一致
-const API_BASE_URL = 'http://192.168.1.66:8596';
+// 动态设置基础URL，适应不同的访问方式
+const getApiBaseUrl = () => {
+  // 如果是开发环境或localhost，使用localhost
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+    return 'http://localhost:8596';
+  }
+  // 否则使用当前域名的8596端口
+  return `http://${window.location.hostname}:8596`;
+};
+
+const API_BASE_URL = getApiBaseUrl();
 
 const authApi = axios.create({
   baseURL: API_BASE_URL,
@@ -65,7 +74,8 @@ authApi.interceptors.response.use(
           throw new Error('No refresh token available');
         }
         
-        const response = await authApi.post('/api/auth/refresh', {
+        // 直接使用axios避免触发拦截器
+        const response = await axios.post(`${API_BASE_URL}/api/auth/refresh`, {
           refresh_token: refreshToken
         });
         
@@ -212,7 +222,8 @@ export const refreshToken = async (): Promise<{ access_token: string }> => {
     throw new Error('No refresh token available');
   }
   
-  const response = await authApi.post<{ access_token: string }>('/api/auth/refresh', {
+  // 直接使用axios避免触发拦截器，防止无限循环
+  const response = await axios.post<{ access_token: string }>(`${API_BASE_URL}/api/auth/refresh`, {
     refresh_token
   });
   

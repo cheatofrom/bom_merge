@@ -29,6 +29,16 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const [loading, setLoading] = useState(true);
   const tokenCheckInterval = useRef<NodeJS.Timeout | null>(null);
 
+  const handleLogout = useCallback(() => {
+    setUser(null);
+    setLoading(false); // 确保登出时停止加载状态
+    clearAuth();
+    if (tokenCheckInterval.current) {
+      clearInterval(tokenCheckInterval.current);
+      tokenCheckInterval.current = null;
+    }
+  }, []);
+
   const initializeAuth = useCallback(async () => {
     try {
       if (isAuthenticated()) {
@@ -62,7 +72,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [handleLogout]);
 
   // 定期检查token有效性
   const startTokenValidationCheck = useCallback(() => {
@@ -84,7 +94,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         }
       }
     }, 5 * 60 * 1000); // 5分钟
-  }, [user]);
+  }, [user, handleLogout]);
   
   const stopTokenValidationCheck = useCallback(() => {
     if (tokenCheckInterval.current) {
@@ -107,7 +117,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
         handleLogout();
       }
     }
-  }, [user]);
+  }, [user, handleLogout]);
   
   // 当用户登录时启动token检查，登出时停止
   useEffect(() => {
@@ -131,17 +141,11 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
     setUser(userData);
   };
 
-  const handleLogout = () => {
-    setUser(null);
-    clearAuth();
-    stopTokenValidationCheck();
-  };
-
   const checkIsAdmin = (): boolean => {
     return user?.role === 'admin';
   };
 
-  const refreshUser = async () => {
+  const refreshUser = useCallback(async () => {
     try {
       if (isAuthenticated()) {
         const currentUser = await getCurrentUser();
@@ -152,7 +156,7 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
       console.error('Refresh user error:', error);
       handleLogout();
     }
-  };
+  }, [handleLogout]);
 
   const value: AuthContextType = {
     user,

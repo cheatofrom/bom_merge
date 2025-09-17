@@ -376,6 +376,11 @@ async def delete_category_async(category_id: int) -> bool:
             if count > 0:
                 raise ValueError(f"无法删除分类，还有 {count} 个项目正在使用此分类")
             
+            # 删除该分类的所有用户权限记录
+            delete_permissions_query = "DELETE FROM user_category_permissions WHERE category_id = $1"
+            permissions_result = await conn.execute(delete_permissions_query, category_id)
+            logger.info(f"删除分类 {category_id} 的权限记录: {permissions_result}")
+            
             # 删除分类
             delete_query = "DELETE FROM categories WHERE id = $1"
             result = await conn.execute(delete_query, category_id)

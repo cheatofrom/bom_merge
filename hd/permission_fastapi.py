@@ -22,13 +22,13 @@ def create_permission_routes(app: FastAPI):
             if user_info['role'] == 'admin':
                 return True
             
-            # 构建缓存键
-            cache_key = f"permission:{user_info['id']}:{resource_type}:{resource_id}:{required_permission}"
+            # 构建缓存键（确保数据类型一致性）
+            cache_key = f"permission:{int(user_info['id'])}:{resource_type}:{int(resource_id)}:{required_permission}"
             
             # 尝试从缓存获取权限结果
             cached_result = cache_service.get(cache_key)
             if cached_result is not None:
-                logger.debug(f"从缓存获取权限检查结果: {cache_key}")
+                logger.info(f"从缓存获取权限检查结果: {cache_key} = {cached_result}")  # 改为INFO级别便于调试
                 return cached_result
             
             # 缓存未命中，查询数据库
@@ -61,7 +61,7 @@ def create_permission_routes(app: FastAPI):
                     
                     # 缓存权限检查结果（5分钟）
                     cache_service.set(cache_key, result, expire=300)
-                    logger.debug(f"缓存权限检查结果: {cache_key} = {result}")
+                    logger.info(f"缓存权限检查结果: {cache_key} = {result}")  # 改为INFO级别便于调试
                     
                     return result
                 finally:
@@ -118,6 +118,36 @@ def create_permission_routes(app: FastAPI):
             
             conn.commit()
             
+            # 清除相关权限缓存，确保权限变更立即生效
+            try:
+                # 清除该用户对该分类的所有权限缓存（包括所有权限级别）
+                permission_levels = ['view', 'edit', 'delete', 'admin']
+                deleted_total = 0
+                
+                for level in permission_levels:
+                    cache_key = f"permission:{int(permission_data.user_id)}:category:{int(permission_data.category_id)}:{level}"
+                    if cache_service.delete(cache_key):
+                        deleted_total += 1
+                        logger.info(f"清除权限缓存键: {cache_key}")
+                
+                # 也尝试使用模式匹配清除，以防有其他格式的缓存
+                pattern = f"permission:{int(permission_data.user_id)}:category:{int(permission_data.category_id)}:*"
+                pattern_deleted = cache_service.clear_pattern(pattern)
+                
+                # 清除用户分类缓存，确保用户看到的分类列表立即更新
+                user_categories_pattern = f"user_categories:{permission_data.user_id}:*"
+                user_categories_deleted = cache_service.clear_pattern(user_categories_pattern)
+                
+                # 清除用户文件列表缓存，确保文件显示立即更新
+                user_files_pattern = f"uploaded_files:{permission_data.user_id}:*"
+                user_files_deleted = cache_service.clear_pattern(user_files_pattern)
+                
+                logger.info(f"已清除用户 {permission_data.user_id} 对分类 {permission_data.category_id} 的权限缓存，直接删除 {deleted_total} 个，模式匹配删除 {pattern_deleted} 个，用户分类缓存删除 {user_categories_deleted} 个，用户文件缓存删除 {user_files_deleted} 个")
+                
+            except Exception as cache_error:
+                logger.warning(f"清除权限缓存时出错: {cache_error}")
+                # 缓存清理失败不影响权限授予操作的成功
+            
             # 记录操作日志
             auth_service.log_user_activity(
                 user_info['id'],
@@ -171,6 +201,32 @@ def create_permission_routes(app: FastAPI):
                 )
             
             conn.commit()
+            
+            # 清除相关权限缓存，确保权限变更立即生效
+            try:
+                # 清除该用户对该分类的所有权限缓存（包括所有权限级别）
+                permission_levels = ['view', 'edit', 'delete', 'admin']
+                deleted_total = 0
+                
+                for level in permission_levels:
+                    cache_key = f"permission:{int(permission_data.user_id)}:category:{int(permission_data.category_id)}:{level}"
+                    if cache_service.delete(cache_key):
+                        deleted_total += 1
+                        logger.info(f"清除权限缓存键: {cache_key}")
+                
+                # 也尝试使用模式匹配清除，以防有其他格式的缓存
+                pattern = f"permission:{int(permission_data.user_id)}:category:{int(permission_data.category_id)}:*"
+                pattern_deleted = cache_service.clear_pattern(pattern)
+                
+                # 清除用户分类缓存，确保用户看到的分类列表立即更新
+                user_categories_pattern = f"user_categories:{permission_data.user_id}:*"
+                user_categories_deleted = cache_service.clear_pattern(user_categories_pattern)
+                
+                logger.info(f"已清除用户 {permission_data.user_id} 对分类 {permission_data.category_id} 的权限缓存，直接删除 {deleted_total} 个，模式匹配删除 {pattern_deleted} 个，用户分类缓存删除 {user_categories_deleted} 个")
+                
+            except Exception as cache_error:
+                logger.warning(f"清除权限缓存时出错: {cache_error}")
+                # 缓存清理失败不影响权限撤销操作的成功
             
             # 记录操作日志
             auth_service.log_user_activity(

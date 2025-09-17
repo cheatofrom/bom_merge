@@ -227,7 +227,11 @@ const ProjectSelection: React.FC = () => {
     const fileList = event.target.files;
     if (!fileList || fileList.length === 0) return;
 
-    // 所有用户都可以上传文件
+    // 普通用户必须选择分类才能上传文件
+    if (!isAdmin() && !selectedCategoryId) {
+      setError('请先选择一个分类再上传文件');
+      return;
+    }
 
     // 转换FileList为数组
     const filesArray = Array.from(fileList);
@@ -590,7 +594,12 @@ const ProjectSelection: React.FC = () => {
    */
   const getFilteredFiles = () => {
     if (!selectedCategoryId) {
-      return uploadedFiles; // 没有选中分类时显示所有文件
+      // 管理员没有选中分类时显示所有文件
+      if (isAdmin()) {
+        return uploadedFiles;
+      }
+      // 普通用户没有选中分类时不显示任何文件（避免显示无权限的文件）
+      return [];
     }
     return uploadedFiles.filter(file => file.category_id === parseInt(selectedCategoryId));
   };
@@ -766,13 +775,17 @@ const ProjectSelection: React.FC = () => {
           {/* 上传Excel文件区域 - 所有用户可见 */}
           <button
             onClick={handleUploadClick}
-            disabled={uploading}
-            className={`px-6 py-3 rounded-lg shadow-md font-semibold text-lg flex items-center transition-all duration-200 ${uploading ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-green-600 text-white hover:bg-green-700 hover:shadow-lg'}`}
+            disabled={uploading || (!isAdmin() && !selectedCategoryId)}
+            className={`px-6 py-3 rounded-lg shadow-md font-semibold text-lg flex items-center transition-all duration-200 ${
+              uploading || (!isAdmin() && !selectedCategoryId)
+                ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
+                : 'bg-green-600 text-white hover:bg-green-700 hover:shadow-lg'
+            }`}
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-2" viewBox="0 0 20 20" fill="currentColor">
               <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
             </svg>
-            {uploading ? '上传中...' : selectedCategoryId ? `上传到 ${categories.find(c => c.id.toString() === selectedCategoryId)?.name || '当前分类'}` : '上传Excel文件（可多选）'}
+            {uploading ? '上传中...' : selectedCategoryId ? `上传到 ${categories.find(c => c.id.toString() === selectedCategoryId)?.name || '当前分类'}` : isAdmin() ? '上传Excel文件（可多选）' : '请先选择分类'}
           </button>
         </div>
         {/* 隐藏的文件上传输入框，通过按钮触发点击 */}
@@ -863,12 +876,16 @@ const ProjectSelection: React.FC = () => {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 <div className="text-gray-500 text-xl font-medium">
-                  {uploadedFiles.length === 0 ? '没有可用的项目' : '该分类下没有项目'}
+                  {!isAdmin() && categories.length === 0 ? '您暂无分类权限' : 
+                   uploadedFiles.length === 0 ? '没有可用的项目' : 
+                   '该分类下没有项目'}
                 </div>
                 <div className="text-gray-400 mt-2">
-                  {uploadedFiles.length === 0 
-                    ? '请点击右上角的"上传Excel文件"按钮上传项目数据' 
-                    : selectedCategoryId ? '请选择其他分类或上传新项目到此分类' : '请选择其他分类查看项目'
+                  {!isAdmin() && categories.length === 0 
+                    ? '请联系管理员为您分配分类权限' 
+                    : uploadedFiles.length === 0 
+                      ? isAdmin() ? '请点击右上角的"上传Excel文件"按钮上传项目数据' : '请联系管理员上传项目数据或为您分配权限'
+                      : selectedCategoryId ? '请选择其他分类或上传新项目到此分类' : '请选择分类查看项目'
                   }
                 </div>
                 {uploadedFiles.length === 0 && isAdmin() && (

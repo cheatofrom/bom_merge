@@ -2,12 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { getUsers, getUserPermissions, grantPermission, revokePermission, User, Permission } from '../services/auth';
 import { getUploadedFiles } from '../services/api';
 import { UploadedFile } from '../types';
+import { useAuth } from '../contexts/AuthContext';
 
 interface PermissionSettingsProps {
   className?: string;
 }
 
 const PermissionSettings: React.FC<PermissionSettingsProps> = ({ className = '' }) => {
+  const { user: currentUser, refreshUser } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [files, setFiles] = useState<UploadedFile[]>([]);
   const [selectedUser, setSelectedUser] = useState<string>('');
@@ -96,6 +98,20 @@ const PermissionSettings: React.FC<PermissionSettingsProps> = ({ className = '' 
       // 刷新用户权限
       const response = await getUserPermissions(parseInt(selectedUser));
       setUserPermissions(response.permissions);
+
+      // 如果修改的是当前登录用户的权限，刷新当前用户信息
+      if (currentUser && parseInt(selectedUser) === currentUser.id) {
+        await refreshUser();
+      }
+      
+      // 强制清除浏览器缓存，确保下次访问时获取最新权限
+      if ('caches' in window) {
+        caches.keys().then(names => {
+          names.forEach(name => {
+            caches.delete(name);
+          });
+        });
+      }
 
       // 清除成功消息
       setTimeout(() => setSuccess(null), 3000);

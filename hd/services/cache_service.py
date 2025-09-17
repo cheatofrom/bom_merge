@@ -90,13 +90,13 @@ class CacheService:
         try:
             if self.redis_client:
                 result = self.redis_client.delete(key)
-                logger.debug(f"Redis删除缓存: {key}, 结果: {result}")
+                logger.info(f"Redis删除缓存: {key}, 结果: {result}")  # 改为INFO级别便于调试
                 return bool(result)
             else:
                 # 内存缓存删除
                 if key in self._memory_cache:
                     del self._memory_cache[key]
-                    logger.debug(f"内存删除缓存: {key}")
+                    logger.info(f"内存删除缓存: {key}")  # 改为INFO级别便于调试
                     return True
                 return False
         except Exception as e:
@@ -124,7 +124,11 @@ class CacheService:
             if self.redis_client:
                 keys = self.redis_client.keys(pattern)
                 if keys:
-                    return self.redis_client.delete(*keys)
+                    deleted_count = self.redis_client.delete(*keys)
+                    logger.info(f"Redis清除模式缓存: {pattern}, 匹配键: {len(keys)}, 删除: {deleted_count}")  # 改为INFO级别便于调试
+                    return deleted_count
+                else:
+                    logger.info(f"Redis清除模式缓存: {pattern}, 未找到匹配的键")  # 改为INFO级别便于调试
                 return 0
             else:
                 # 内存缓存的模式匹配
@@ -133,6 +137,7 @@ class CacheService:
                                 if fnmatch.fnmatch(key, pattern)]
                 for key in keys_to_delete:
                     del self._memory_cache[key]
+                logger.info(f"内存清除模式缓存: {pattern}, 删除: {len(keys_to_delete)}")  # 改为INFO级别便于调试
                 return len(keys_to_delete)
         except Exception as e:
             logger.error(f"清除模式缓存失败: {e}")

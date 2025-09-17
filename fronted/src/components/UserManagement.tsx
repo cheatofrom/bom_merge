@@ -3,8 +3,10 @@ import { getUsers, toggleUserStatus, getUserPermissions, grantPermission, revoke
 import { getAllCategories } from '../services/api';
 import { Category } from '../types';
 import ConfirmDialog from './ConfirmDialog';
+import { useAuth } from '../contexts/AuthContext';
 
 const UserManagement: React.FC = () => {
+  const { user: currentUser, refreshUser } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [userPermissions, setUserPermissions] = useState<Permission[]>([]);
@@ -152,6 +154,24 @@ const UserManagement: React.FC = () => {
         console.log('loadUserPermissions 完成');
         await loadUserCategories(selectedUser.id);
         console.log('loadUserCategories 完成');
+        
+        // 如果修改的是当前登录用户的权限，刷新当前用户信息
+        if (currentUser && selectedUser.id === currentUser.id) {
+          console.log('刷新当前用户权限信息');
+          await refreshUser();
+        }
+        
+        // 通知用户权限已更新（可以通过WebSocket或其他方式实现实时通知）
+        console.log(`用户 ${selectedUser.username} 的权限已更新`);
+        
+        // 强制清除浏览器缓存，确保下次访问时获取最新权限
+        if ('caches' in window) {
+          caches.keys().then(names => {
+            names.forEach(name => {
+              caches.delete(name);
+            });
+          });
+        }
       } catch (loadError) {
         console.error('重新加载权限失败:', loadError);
         throw loadError;

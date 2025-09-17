@@ -57,26 +57,44 @@ from services.category_service import (
 
 # 获取上传文件列表API
 @app.get("/uploaded_files")
-async def get_uploaded_files():
+async def get_uploaded_files(current_user_data = Depends(get_current_user)):
     """
-    获取所有上传的文件信息（带缓存优化）
+    获取用户有权限的上传文件信息（带缓存优化）
     """
     try:
-        # 尝试从缓存获取上传文件列表
-        cache_key = "uploaded_files:all"
+        user_info, token = current_user_data
+        user_id = user_info['id']
+        user_role = user_info['role']
+        
+        # 构建缓存键，包含用户ID和角色
+        cache_key = f"uploaded_files:{user_id}:{user_role}"
         cached_files = cache_service.get(cache_key)
         if cached_files is not None:
-            logger.debug("从缓存获取上传文件列表")
+            logger.debug(f"从缓存获取用户{user_id}的上传文件列表")
             return cached_files
         
         # 缓存未命中，查询数据库
         async with get_async_db_connection() as conn:
-            rows = await conn.fetch("""
-                SELECT file_unique_id, original_filename, project_name, 
-                       file_size, upload_time, status, rows_imported, category_id
-                FROM uploaded_files 
-                ORDER BY upload_time DESC
-            """)
+            if user_role == 'admin':
+                # 管理员可以看到所有文件
+                rows = await conn.fetch("""
+                    SELECT file_unique_id, original_filename, project_name, 
+                           file_size, upload_time, status, rows_imported, category_id
+                    FROM uploaded_files 
+                    ORDER BY upload_time DESC
+                """)
+                logger.info(f"管理员查询结果: 找到 {len(rows)} 个上传文件")
+            else:
+                # 普通用户只能看到有权限的分类下的文件
+                rows = await conn.fetch("""
+                    SELECT uf.file_unique_id, uf.original_filename, uf.project_name, 
+                           uf.file_size, uf.upload_time, uf.status, uf.rows_imported, uf.category_id
+                    FROM uploaded_files uf
+                    JOIN user_category_permissions ucp ON uf.category_id = ucp.category_id
+                    WHERE ucp.user_id = $1 AND ucp.permission_type IN ('view', 'edit')
+                    ORDER BY uf.upload_time DESC
+                """, user_id)
+                logger.info(f"普通用户查询结果: 找到 {len(rows)} 个有权限的上传文件")
         
         # 转换查询结果
         result = []
@@ -87,9 +105,9 @@ async def get_uploaded_files():
                 file_dict['upload_time'] = str(file_dict['upload_time'])
             result.append(file_dict)
         
-        # 缓存上传文件列表（10分钟）
-        cache_service.set(cache_key, result, expire=600)
-        logger.debug(f"缓存上传文件列表，共{len(result)}个文件")
+        # 缓存上传文件列表（5分钟，因为权限可能变化较频繁）
+        cache_service.set(cache_key, result, expire=300)
+        logger.debug(f"缓存用户{user_id}的上传文件列表，共{len(result)}个文件")
         
         return result
         
@@ -1258,12 +1276,25 @@ async def create_category(request: Request):
                 if cache_keys:
                     cache_service.redis_client.delete(*cache_keys)
                     logger.info(f"清理了 {len(cache_keys)} 个用户分类缓存")
+                
+                # 清理该分类相关的权限缓存
+                permission_cache_keys = cache_service.redis_client.keys(f"permission:*:category:{category_id}:*")
+                if permission_cache_keys:
+                    cache_service.redis_client.delete(*permission_cache_keys)
+                    logger.info(f"清理了 {len(permission_cache_keys)} 个分类 {category_id} 的权限缓存")
             else:
                 # 内存缓存清理
                 keys_to_delete = [key for key in cache_service._memory_cache.keys() if key.startswith("user_categories:")]
                 for key in keys_to_delete:
                     del cache_service._memory_cache[key]
                 logger.info(f"清理了 {len(keys_to_delete)} 个内存分类缓存")
+                
+                # 清理权限缓存
+                permission_keys_to_delete = [key for key in cache_service._memory_cache.keys() 
+                                           if key.startswith("permission:") and f":category:{category_id}:" in key]
+                for key in permission_keys_to_delete:
+                    del cache_service._memory_cache[key]
+                logger.info(f"清理了 {len(permission_keys_to_delete)} 个内存权限缓存")
         except Exception as cache_error:
             logger.warning(f"清理分类缓存失败: {cache_error}")
         
