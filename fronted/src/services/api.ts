@@ -118,25 +118,25 @@ export const getAllProjectNotes = async (): Promise<ProjectNote[]> => {
 // 获取上传文件列表
 export const getUploadedFiles = async (projectName?: string): Promise<UploadedFile[]> => {
   const url = projectName ? `/uploaded_files?project_name=${projectName}` : '/uploaded_files';
-  const response = await api.get<UploadedFile[]>(url);
+  const response = await authApi.get<UploadedFile[]>(url);
   return response.data;
 };
 
 // 获取单个上传文件信息
 export const getUploadedFile = async (fileUniqueId: string): Promise<UploadedFile> => {
-  const response = await api.get<UploadedFile>(`/uploaded_files/${fileUniqueId}`);
+  const response = await authApi.get<UploadedFile>(`/uploaded_files/${fileUniqueId}`);
   return response.data;
 };
 
 // 更新文件名
 export const updateFileName = async (fileUniqueId: string, newFilename: string): Promise<{status: string, message: string, file: UploadedFile}> => {
-  const response = await api.put<{status: string, message: string, file: UploadedFile}>(`/uploaded_files/${fileUniqueId}/rename?new_filename=${encodeURIComponent(newFilename)}`);
+  const response = await authApi.put<{status: string, message: string, file: UploadedFile}>(`/uploaded_files/${fileUniqueId}/rename?new_filename=${encodeURIComponent(newFilename)}`);
   return response.data;
 };
 
 // 更新项目名称
 export const updateProjectName = async (fileUniqueId: string, newProjectName: string): Promise<{status: string, message: string, file: UploadedFile}> => {
-  const response = await api.put<{status: string, message: string, file: UploadedFile}>(`/uploaded_files/${fileUniqueId}/update_project?new_project_name=${encodeURIComponent(newProjectName)}`);
+  const response = await authApi.put<{status: string, message: string, file: UploadedFile}>(`/uploaded_files/${fileUniqueId}/update_project?new_project_name=${encodeURIComponent(newProjectName)}`);
   return response.data;
 };
 

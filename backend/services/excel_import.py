@@ -33,7 +33,16 @@ def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=N
     try:
         # 使用临时文件路径读取Excel，并指定读取"BOM"工作表
         logger.info("开始读取Excel文件")
-        xls = pd.ExcelFile(tmp_path)
+        # 指定引擎以支持不同格式的Excel文件
+        try:
+            xls = pd.ExcelFile(tmp_path, engine='openpyxl')
+        except Exception as e:
+            logger.warning(f"使用openpyxl引擎失败: {e}，尝试使用xlrd引擎")
+            try:
+                xls = pd.ExcelFile(tmp_path, engine='xlrd')
+            except Exception as e2:
+                logger.error(f"使用xlrd引擎也失败: {e2}，尝试自动检测")
+                xls = pd.ExcelFile(tmp_path)
         
         logger.info(f"Excel工作表列表: {xls.sheet_names}")
         
@@ -139,10 +148,11 @@ def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=N
     
     logger.info("处理total_weight_kg列")
     try:
-        df["total_weight_kg"] = pd.to_numeric(df["total_weight_kg"], errors='coerce')
-        logger.debug(f"total_weight_kg列转换为数值后的前5个值: {df['total_weight_kg'].head().tolist()}")
-        df["total_weight_kg"] = df["total_weight_kg"].fillna(0)
-        logger.debug(f"total_weight_kg列填充空值后的前5个值: {df['total_weight_kg'].head().tolist()}")
+        # 保持原始精度，将NaN值填充为空字符串，避免浮点数精度问题
+        df["total_weight_kg"] = df["total_weight_kg"].fillna('').astype(str)
+        # 清理可能的.0后缀，但保持原始小数精度
+        df["total_weight_kg"] = df["total_weight_kg"].apply(lambda x: x.rstrip('.0') if x.endswith('.0') else x)
+        logger.debug(f"total_weight_kg列处理后的前5个值: {df['total_weight_kg'].head().tolist()}")
     except Exception as e:
         logger.error(f"处理total_weight_kg列时出错: {e}\n{traceback.format_exc()}")
         raise ValueError(f"处理total_weight_kg列时出错: {e}")
@@ -255,7 +265,16 @@ async def import_excel_to_db_async(file_stream, upload_batch, project_name, file
     try:
         # Excel读取和数据处理逻辑与同步版本相同
         logger.info("开始读取Excel文件")
-        xls = pd.ExcelFile(tmp_path)
+        # 指定引擎以支持不同格式的Excel文件
+        try:
+            xls = pd.ExcelFile(tmp_path, engine='openpyxl')
+        except Exception as e:
+            logger.warning(f"使用openpyxl引擎失败: {e}，尝试使用xlrd引擎")
+            try:
+                xls = pd.ExcelFile(tmp_path, engine='xlrd')
+            except Exception as e2:
+                logger.error(f"使用xlrd引擎也失败: {e2}，尝试自动检测")
+                xls = pd.ExcelFile(tmp_path)
         
         logger.info(f"Excel工作表列表: {xls.sheet_names}")
         
@@ -358,10 +377,11 @@ async def import_excel_to_db_async(file_stream, upload_batch, project_name, file
         
         logger.info("处理total_weight_kg列")
         try:
-            df["total_weight_kg"] = pd.to_numeric(df["total_weight_kg"], errors='coerce')
-            logger.debug(f"total_weight_kg列转换为数值后的前5个值: {df['total_weight_kg'].head().tolist()}")
-            df["total_weight_kg"] = df["total_weight_kg"].fillna(0)
-            logger.debug(f"total_weight_kg列填充空值后的前5个值: {df['total_weight_kg'].head().tolist()}")
+            # 保持原始精度，将NaN值填充为空字符串，避免浮点数精度问题
+            df["total_weight_kg"] = df["total_weight_kg"].fillna('').astype(str)
+            # 清理可能的.0后缀，但保持原始小数精度
+            df["total_weight_kg"] = df["total_weight_kg"].apply(lambda x: x.rstrip('.0') if x.endswith('.0') else x)
+            logger.debug(f"total_weight_kg列处理后的前5个值: {df['total_weight_kg'].head().tolist()}")
         except Exception as e:
             logger.error(f"处理total_weight_kg列时出错: {e}\n{traceback.format_exc()}")
             raise ValueError(f"处理total_weight_kg列时出错: {e}")

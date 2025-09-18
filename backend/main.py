@@ -65,6 +65,7 @@ async def get_uploaded_files(current_user_data = Depends(get_current_user)):
         user_info, token = current_user_data
         user_id = user_info['id']
         user_role = user_info['role']
+        logger.info(f"用户 {user_id} (角色: {user_role}) 请求上传文件列表")
         
         # 构建缓存键，包含用户ID和角色
         cache_key = f"uploaded_files:{user_id}:{user_role}"
@@ -111,8 +112,12 @@ async def get_uploaded_files(current_user_data = Depends(get_current_user)):
         
         return result
         
+    except HTTPException as http_exc:
+        logger.error(f"HTTP异常: {http_exc.status_code} - {http_exc.detail}")
+        raise http_exc
     except Exception as e:
         logger.error(f"获取上传文件列表时出错: {str(e)}")
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
         return JSONResponse(status_code=500, content={"error": f"获取上传文件列表时出错: {str(e)}"})
 
 
@@ -310,11 +315,13 @@ async def upload_parts_excel(
     
     # 如果有文件上传成功，清除相关缓存
     if any(result["status"] == "imported" for result in results):
-        # 清除上传文件列表缓存
-        cache_service.delete("uploaded_files:all")
+        # 清除所有上传文件列表缓存（包括用户特定的缓存）
+        cache_service.clear_pattern("uploaded_files:*")
         # 清除项目列表缓存
         cache_service.delete("projects:all")
         cache_service.delete("project_names:all")
+        # 清除用户项目缓存
+        cache_service.clear_pattern("user_projects:*")
         logger.info("文件上传成功，已清除相关缓存")
     
     if all(result["status"] == "imported" for result in results):
@@ -1129,8 +1136,8 @@ def delete_project_by_file_id(file_unique_id: str):
             
         # 清理相关缓存
         try:
-            # 清理上传文件列表缓存
-            cache_service.delete("uploaded_files:all")
+            # 清理所有上传文件列表缓存（包括用户特定的缓存）
+            cache_service.clear_pattern("uploaded_files:*")
             logger.info("已清理上传文件列表缓存")
             
             # 清理项目列表相关缓存
