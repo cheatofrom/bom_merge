@@ -137,10 +137,26 @@ def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=N
         logger.error(f"处理unit_count_per_level列时出错: {e}\n{traceback.format_exc()}")
         raise ValueError(f"处理unit_count_per_level列时出错: {e}")
     
-    # 处理unit_weight_kg列，保留原始值，但将NaN值填充为空字符串
+    # 处理unit_weight_kg列，避免浮点数精度问题
     logger.info("处理unit_weight_kg列")
     try:
-        df["unit_weight_kg"] = df["unit_weight_kg"].fillna('').astype(str)
+        # 避免浮点数精度问题的正确处理方式
+        def format_numeric_value(value):
+            if pd.isna(value):
+                return ''
+            if isinstance(value, (int, float)):
+                # 使用Decimal来保持精度，然后格式化为合理的小数位数
+                from decimal import Decimal, ROUND_HALF_UP
+                try:
+                    # 转换为Decimal并保留6位小数精度，去除尾随零
+                    decimal_val = Decimal(str(value)).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+                    # 去除尾随零并返回字符串
+                    return str(decimal_val.normalize())
+                except:
+                    return str(value)
+            return str(value)
+
+        df["unit_weight_kg"] = df["unit_weight_kg"].apply(format_numeric_value)
         logger.debug(f"unit_weight_kg列处理后的前5个值: {df['unit_weight_kg'].head().tolist()}")
     except Exception as e:
         logger.error(f"处理unit_weight_kg列时出错: {e}\n{traceback.format_exc()}")
@@ -148,10 +164,23 @@ def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=N
     
     logger.info("处理total_weight_kg列")
     try:
-        # 保持原始精度，将NaN值填充为空字符串，避免浮点数精度问题
-        df["total_weight_kg"] = df["total_weight_kg"].fillna('').astype(str)
-        # 清理可能的.0后缀，但保持原始小数精度
-        df["total_weight_kg"] = df["total_weight_kg"].apply(lambda x: x.rstrip('.0') if x.endswith('.0') else x)
+        # 避免浮点数精度问题的正确处理方式
+        def format_numeric_value(value):
+            if pd.isna(value):
+                return ''
+            if isinstance(value, (int, float)):
+                # 使用Decimal来保持精度，然后格式化为合理的小数位数
+                from decimal import Decimal, ROUND_HALF_UP
+                try:
+                    # 转换为Decimal并保留6位小数精度，去除尾随零
+                    decimal_val = Decimal(str(value)).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+                    # 去除尾随零并返回字符串
+                    return str(decimal_val.normalize())
+                except:
+                    return str(value)
+            return str(value)
+
+        df["total_weight_kg"] = df["total_weight_kg"].apply(format_numeric_value)
         logger.debug(f"total_weight_kg列处理后的前5个值: {df['total_weight_kg'].head().tolist()}")
     except Exception as e:
         logger.error(f"处理total_weight_kg列时出错: {e}\n{traceback.format_exc()}")
@@ -366,21 +395,50 @@ async def import_excel_to_db_async(file_stream, upload_batch, project_name, file
             logger.error(f"处理unit_count_per_level列时出错: {e}\n{traceback.format_exc()}")
             raise ValueError(f"处理unit_count_per_level列时出错: {e}")
         
-        # 处理unit_weight_kg列，保留原始值，但将NaN值填充为空字符串
+        # 处理unit_weight_kg列，避免浮点数精度问题
         logger.info("处理unit_weight_kg列")
         try:
-            df["unit_weight_kg"] = df["unit_weight_kg"].fillna('').astype(str)
+            # 避免浮点数精度问题的正确处理方式
+            def format_numeric_value(value):
+                if pd.isna(value):
+                    return ''
+                if isinstance(value, (int, float)):
+                    # 使用Decimal来保持精度，然后格式化为合理的小数位数
+                    from decimal import Decimal, ROUND_HALF_UP
+                    try:
+                        # 转换为Decimal并保留6位小数精度，去除尾随零
+                        decimal_val = Decimal(str(value)).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+                        # 去除尾随零并返回字符串
+                        return str(decimal_val.normalize())
+                    except:
+                        return str(value)
+                return str(value)
+
+            df["unit_weight_kg"] = df["unit_weight_kg"].apply(format_numeric_value)
             logger.debug(f"unit_weight_kg列处理后的前5个值: {df['unit_weight_kg'].head().tolist()}")
         except Exception as e:
             logger.error(f"处理unit_weight_kg列时出错: {e}\n{traceback.format_exc()}")
             raise ValueError(f"处理unit_weight_kg列时出错: {e}")
-        
+
         logger.info("处理total_weight_kg列")
         try:
-            # 保持原始精度，将NaN值填充为空字符串，避免浮点数精度问题
-            df["total_weight_kg"] = df["total_weight_kg"].fillna('').astype(str)
-            # 清理可能的.0后缀，但保持原始小数精度
-            df["total_weight_kg"] = df["total_weight_kg"].apply(lambda x: x.rstrip('.0') if x.endswith('.0') else x)
+            # 避免浮点数精度问题的正确处理方式
+            def format_numeric_value(value):
+                if pd.isna(value):
+                    return ''
+                if isinstance(value, (int, float)):
+                    # 使用Decimal来保持精度，然后格式化为合理的小数位数
+                    from decimal import Decimal, ROUND_HALF_UP
+                    try:
+                        # 转换为Decimal并保留6位小数精度，去除尾随零
+                        decimal_val = Decimal(str(value)).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
+                        # 去除尾随零并返回字符串
+                        return str(decimal_val.normalize())
+                    except:
+                        return str(value)
+                return str(value)
+
+            df["total_weight_kg"] = df["total_weight_kg"].apply(format_numeric_value)
             logger.debug(f"total_weight_kg列处理后的前5个值: {df['total_weight_kg'].head().tolist()}")
         except Exception as e:
             logger.error(f"处理total_weight_kg列时出错: {e}\n{traceback.format_exc()}")
@@ -415,7 +473,17 @@ async def import_excel_to_db_async(file_stream, upload_batch, project_name, file
             
             for index, row in df.iterrows():
                 try:
-                    values = tuple(row[col] for col in columns_in_order)
+                    # 转换数值类型字段的空字符串为None
+                    processed_values = []
+                    for col in columns_in_order:
+                        value = row[col]
+                        # 对于数值类型字段，将空字符串转换为None
+                        if col in ['unit_weight_kg', 'total_weight_kg'] and value == '':
+                            processed_values.append(None)
+                        else:
+                            processed_values.append(value)
+
+                    values = tuple(processed_values)
                     await conn.execute("""
                         INSERT INTO parts_library (
                             level, part_code, part_name, spec,

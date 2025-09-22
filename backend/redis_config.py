@@ -5,7 +5,7 @@ import os
 
 # Redis连接配置
 REDIS_CONFIG = {
-    'host': os.getenv('REDIS_HOST', 'localhost'),
+    'host': os.getenv('REDIS_HOST', '192.168.1.66'),
     'port': int(os.getenv('REDIS_PORT', 6379)),
     'db': int(os.getenv('REDIS_DB', 0)),
     'password': os.getenv('REDIS_PASSWORD', 'your_redis_password_here'),

@@ -1497,5 +1497,5 @@ async def check_async_db_pool_health():
 if __name__ == "__main__":
     import uvicorn
     import time
-    # 使用多个工作进程提高并发能力，生产环境建议设置为CPU核心数
-    uvicorn.run("main:app", host="0.0.0.0", port=8596, workers=4)
+    # Docker环境中使用单进程，通过容器编排实现多实例
+    uvicorn.run("main:app", host="0.0.0.0", port=8596)

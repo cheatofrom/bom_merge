@@ -23,7 +23,7 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children, requireAdmin 
     );
   }
 
-  // 如果用户未登录，重定向到登录页面
+  // 如果用户未登录，立即重定向到登录页面，不显示任何内容
   if (!user) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }

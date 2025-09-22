@@ -42,28 +42,38 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   const initializeAuth = useCallback(async () => {
     try {
       if (isAuthenticated()) {
-        // 验证并刷新token
-        const isValid = await validateAndRefreshToken();
-        
-        if (isValid) {
-          // Token有效，获取用户信息
-          const storedUser = getStoredUser();
-          if (storedUser) {
-            setUser(storedUser);
-            
-            // 验证并更新用户信息
-            try {
-              const currentUser = await getCurrentUser();
-              setUser(currentUser);
-              localStorage.setItem('user_info', JSON.stringify(currentUser));
-            } catch (error) {
-              console.error('Failed to get current user:', error);
-              // 如果获取用户信息失败，使用本地存储的信息
-            }
+        // 首先检查token是否在本地有效
+        if (!isTokenValid()) {
+          console.log('Token已过期，尝试刷新...');
+          // Token已过期，尝试刷新
+          const isValid = await validateAndRefreshToken();
+          if (!isValid) {
+            console.log('Token刷新失败，清除认证状态');
+            handleLogout();
+            return;
+          }
+        }
+
+        // Token有效或刷新成功，获取用户信息
+        const storedUser = getStoredUser();
+        if (storedUser) {
+          setUser(storedUser);
+
+          // 验证并更新用户信息
+          try {
+            const currentUser = await getCurrentUser();
+            setUser(currentUser);
+            localStorage.setItem('user_info', JSON.stringify(currentUser));
+          } catch (error) {
+            console.error('Failed to get current user:', error);
+            // 如果获取用户信息失败，可能是token已失效，清除认证状态
+            handleLogout();
+            return;
           }
         } else {
-          // Token无效或刷新失败，清除认证状态
+          // 没有本地用户信息，清除认证状态
           handleLogout();
+          return;
         }
       }
     } catch (error) {

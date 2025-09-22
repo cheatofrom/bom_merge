@@ -92,12 +92,12 @@ authApi.interceptors.response.use(
         // 刷新失败，处理队列并清除认证信息
         processQueue(refreshError, null);
         clearAuth();
-        
-        // 只有在不是登录页面时才跳转
+
+        // 强制重新加载页面到登录页面，确保完全清除状态
         if (!window.location.pathname.includes('/login')) {
-          window.location.href = '/login';
+          window.location.replace('/bom_merge/login');
         }
-        
+
         return Promise.reject(refreshError);
       } finally {
         isRefreshing = false;

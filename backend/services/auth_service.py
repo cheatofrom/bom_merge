@@ -1,11 +1,9 @@
 import hashlib
 import jwt
-import secrets
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, Tuple
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from psycopg2 import Error
 import bcrypt
 import logging
 from db import get_db_connection
@@ -83,7 +81,7 @@ class AuthService:
 
     
     def login_user(self, username: str, password: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-        """用户登录（带连接管理优化）"""
+        """用户登录（Redis会话管理）"""
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -94,40 +92,49 @@ class AuthService:
                         (username, username)
                     )
                     user = cursor.fetchone()
-                    
+
                     if not user:
                         return False, "用户不存在", None
-                    
+
                     if not user['is_active']:
                         return False, "账户已被禁用", None
-                    
+
                     # 验证密码
                     if not self.verify_password(password, user['password_hash']):
                         return False, "密码错误", None
-                    
+
                     # 生成JWT令牌
                     token = self.generate_jwt_token(user['id'], user['username'], user['role'])
-                    
-                    # 保存会话信息
+
+                    # 将会话信息保存到Redis
+                    session_data = {
+                        'id': user['id'],
+                        'username': user['username'],
+                        'email': user['email'],
+                        'full_name': user['full_name'],
+                        'role': user['role'],
+                        'login_time': datetime.utcnow().isoformat(),
+                        'is_active': user['is_active']
+                    }
+
+                    # 使用token的hash作为Redis键的一部分
                     token_hash = hashlib.sha256(token.encode()).hexdigest()
-                    expires_at = datetime.utcnow() + timedelta(hours=self.token_expire_hours)
-                    
-                    cursor.execute(
-                        "INSERT INTO user_sessions (user_id, token_hash, expires_at) VALUES (%s, %s, %s)",
-                        (user['id'], token_hash, expires_at)
-                    )
-                    
+                    cache_key = f"bom:session:{user['id']}:{token_hash[:16]}"
+
+                    # 设置会话缓存，过期时间与JWT一致
+                    cache_service.set(cache_key, session_data, expire=self.token_expire_hours * 3600)
+
                     # 更新最后登录时间
                     cursor.execute(
                         "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = %s",
                         (user['id'],)
                     )
-                    
+
                     conn.commit()
-                    
+
                     # 记录登录日志
                     self.log_user_activity(user['id'], 'login', 'user', str(user['id']))
-                    
+
                     user_info = {
                         'id': user['id'],
                         'username': user['username'],
@@ -136,108 +143,71 @@ class AuthService:
                         'role': user['role'],
                         'token': token
                     }
-                    
+
                     logger.info(f"User logged in successfully: {username}")
                     return True, "登录成功", user_info
                 finally:
                     cursor.close()
-            
+
         except psycopg2.Error as e:
             logger.error(f"Database error during login: {e}")
             return False, "登录失败，请稍后重试", None
     
     def logout_user(self, token: str) -> Tuple[bool, str]:
-        """用户登出（带缓存清理）"""
+        """用户登出（纯Redis实现）"""
         try:
             # 验证令牌
             payload = self.verify_jwt_token(token)
             if not payload:
                 return False, "无效的令牌"
-            
+
             user_id = payload['user_id']
             token_hash = hashlib.sha256(token.encode()).hexdigest()
-            
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                try:
-                    # 撤销会话
-                    cursor.execute(
-                        "UPDATE user_sessions SET is_revoked = TRUE WHERE token_hash = %s",
-                        (token_hash,)
-                    )
-                    conn.commit()
-                finally:
-                    cursor.close()
-            
-            # 清理相关缓存
-            cache_pattern = f"user_session:{user_id}:*"
-            cache_service.clear_pattern(cache_pattern)
-            logger.debug(f"清理用户缓存: {user_id}")
-            
+
+            # 删除Redis中的会话
+            cache_key = f"bom:session:{user_id}:{token_hash[:16]}"
+            cache_service.delete(cache_key)
+
             # 记录登出日志
             self.log_user_activity(user_id, 'logout', 'user', str(user_id))
-            
+
             logger.info(f"User logged out successfully: {payload['username']}")
             return True, "登出成功"
-            
-        except Error as e:
-            logger.error(f"Database error during logout: {e}")
+
+        except Exception as e:
+            logger.error(f"Logout error: {e}")
             return False, "登出失败"
 
     
     def validate_session(self, token: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """验证用户会话（带缓存优化）"""
+        """验证用户会话（纯Redis实现）"""
         try:
             # 验证JWT令牌
             payload = self.verify_jwt_token(token)
             if not payload:
                 return False, None
-            
+
             user_id = payload['user_id']
             token_hash = hashlib.sha256(token.encode()).hexdigest()
-            
-            # 尝试从缓存获取用户信息
-            cache_key = f"user_session:{user_id}:{token_hash[:16]}"
-            cached_user = cache_service.get(cache_key)
-            
-            if cached_user:
-                logger.debug(f"从缓存获取用户会话: {user_id}")
-                return True, cached_user
-            
-            # 缓存未命中，查询数据库
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                try:
-                    # 检查会话是否有效
-                    cursor.execute(
-                        "SELECT id FROM user_sessions WHERE token_hash = %s AND expires_at > NOW() AND is_revoked = FALSE",
-                        (token_hash,)
-                    )
-                    
-                    if not cursor.fetchone():
-                        return False, None
-                    
-                    # 获取最新用户信息
-                    cursor.execute(
-                        "SELECT id, username, email, full_name, role, is_active FROM users WHERE id = %s",
-                        (user_id,)
-                    )
-                    user = cursor.fetchone()
-                    
-                    if not user or not user['is_active']:
-                        return False, None
-                    
-                    # 将用户信息缓存5分钟
-                    user_dict = dict(user)
-                    cache_service.set(cache_key, user_dict, expire=300)
-                    logger.debug(f"缓存用户会话: {user_id}")
-                    
-                    return True, user_dict
-                finally:
-                    cursor.close()
-            
-        except Error as e:
-            logger.error(f"Database error during session validation: {e}")
+
+            # 从Redis获取会话信息
+            cache_key = f"bom:session:{user_id}:{token_hash[:16]}"
+            session_data = cache_service.get(cache_key)
+
+            if not session_data:
+                logger.debug(f"Redis会话未找到或已过期: {user_id}")
+                return False, None
+
+            # 检查用户是否仍然活跃
+            if not session_data.get('is_active', True):
+                logger.debug(f"用户账户已被禁用: {user_id}")
+                return False, None
+
+            logger.debug(f"从Redis验证会话成功: {user_id}")
+            return True, session_data
+
+        except Exception as e:
+            logger.error(f"Session validation error: {e}")
             return False, None
 
     
@@ -257,26 +227,19 @@ class AuthService:
                 )
                 conn.commit()
             
-        except Error as e:
+        except Exception as e:
             logger.error(f"Error logging user activity: {e}")
 
     
-    def cleanup_expired_sessions(self):
-        """清理过期的会话（带连接管理优化）"""
+    def cleanup_expired_redis_sessions(self):
+        """清理过期的Redis会话（可选方法，Redis会自动过期）"""
         try:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("DELETE FROM user_sessions WHERE expires_at < NOW()")
-                    deleted_count = cursor.rowcount
-                    conn.commit()
-                    
-                    logger.info(f"Cleaned up {deleted_count} expired sessions")
-                finally:
-                    cursor.close()
-            
-        except Error as e:
-            logger.error(f"Error cleaning up expired sessions: {e}")
+            # Redis会自动处理过期的键，这个方法主要用于手动清理或统计
+            # 由于Redis的TTL机制，通常不需要手动清理过期会话
+            logger.info("Redis sessions are automatically expired by TTL mechanism")
+
+        except Exception as e:
+            logger.error(f"Error during Redis session cleanup: {e}")
 
 
 # 创建全局认证服务实例

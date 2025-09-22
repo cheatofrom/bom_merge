@@ -426,13 +426,15 @@ def create_auth_routes(app: FastAPI):
             
             # 删除用户相关的权限记录
             cursor.execute("DELETE FROM user_category_permissions WHERE user_id = %s", (user_id,))
-            
-            # 删除用户会话
-            cursor.execute("DELETE FROM user_sessions WHERE user_id = %s", (user_id,))
-            
+
+            # 清理用户的Redis会话
+            cache_pattern = f"bom:session:{user_id}:*"
+            from services.cache_service import cache_service
+            cache_service.clear_pattern(cache_pattern)
+
             # 删除用户活动日志
             cursor.execute("DELETE FROM user_activity_logs WHERE user_id = %s", (user_id,))
-            
+
             # 删除用户
             cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
             
