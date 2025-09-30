@@ -288,21 +288,8 @@ async def upload_parts_excel(
             if client_host:
                 logger.error(f"客户端信息: {client_host.host}:{client_host.port}")
             
-            # 保存失败信息到uploaded_files表
-            try:
-                logger.info(f"保存失败信息到uploaded_files表, 文件: {file.filename}, 分类ID: {category_id}")
-                save_uploaded_file_info(
-                    original_filename=file.filename,
-                    file_size=file_size,
-                    project_name=current_project_name,
-                    file_unique_id=file_unique_id,
-                    status="failed",
-                    error_message=str(e),
-                    category_id=category_id
-                )
-            except Exception as save_err:
-                logger.error(f"保存文件信息失败: {save_err}")
-                logger.error(f"详细错误信息: {traceback.format_exc()}")
+            # 不再保存失败记录到uploaded_files表，避免出现"空壳"记录
+            logger.info(f"导入失败，不保存记录到uploaded_files表，文件: {file.filename}")
                 
             results.append({
                 "filename": file.filename,

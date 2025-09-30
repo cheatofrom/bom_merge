@@ -137,26 +137,16 @@ def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=N
         logger.error(f"处理unit_count_per_level列时出错: {e}\n{traceback.format_exc()}")
         raise ValueError(f"处理unit_count_per_level列时出错: {e}")
     
-    # 处理unit_weight_kg列，避免浮点数精度问题
+    # 处理unit_weight_kg列，直接转为字符串
     logger.info("处理unit_weight_kg列")
     try:
-        # 避免浮点数精度问题的正确处理方式
-        def format_numeric_value(value):
+        # 简单地将所有值转换为字符串
+        def format_to_string(value):
             if pd.isna(value):
                 return ''
-            if isinstance(value, (int, float)):
-                # 使用Decimal来保持精度，然后格式化为合理的小数位数
-                from decimal import Decimal, ROUND_HALF_UP
-                try:
-                    # 转换为Decimal并保留6位小数精度，去除尾随零
-                    decimal_val = Decimal(str(value)).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
-                    # 去除尾随零并返回字符串
-                    return str(decimal_val.normalize())
-                except:
-                    return str(value)
-            return str(value)
+            return str(value).strip()
 
-        df["unit_weight_kg"] = df["unit_weight_kg"].apply(format_numeric_value)
+        df["unit_weight_kg"] = df["unit_weight_kg"].apply(format_to_string)
         logger.debug(f"unit_weight_kg列处理后的前5个值: {df['unit_weight_kg'].head().tolist()}")
     except Exception as e:
         logger.error(f"处理unit_weight_kg列时出错: {e}\n{traceback.format_exc()}")
@@ -164,23 +154,8 @@ def import_excel_to_db(file_stream, upload_batch, project_name, file_unique_id=N
     
     logger.info("处理total_weight_kg列")
     try:
-        # 避免浮点数精度问题的正确处理方式
-        def format_numeric_value(value):
-            if pd.isna(value):
-                return ''
-            if isinstance(value, (int, float)):
-                # 使用Decimal来保持精度，然后格式化为合理的小数位数
-                from decimal import Decimal, ROUND_HALF_UP
-                try:
-                    # 转换为Decimal并保留6位小数精度，去除尾随零
-                    decimal_val = Decimal(str(value)).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP)
-                    # 去除尾随零并返回字符串
-                    return str(decimal_val.normalize())
-                except:
-                    return str(value)
-            return str(value)
-
-        df["total_weight_kg"] = df["total_weight_kg"].apply(format_numeric_value)
+        # 简单地将所有值转换为字符串
+        df["total_weight_kg"] = df["total_weight_kg"].apply(format_to_string)
         logger.debug(f"total_weight_kg列处理后的前5个值: {df['total_weight_kg'].head().tolist()}")
     except Exception as e:
         logger.error(f"处理total_weight_kg列时出错: {e}\n{traceback.format_exc()}")
@@ -473,13 +448,17 @@ async def import_excel_to_db_async(file_stream, upload_batch, project_name, file
             
             for index, row in df.iterrows():
                 try:
-                    # 转换数值类型字段的空字符串为None
+                    # 转换数值类型字段的空字符串为None，特殊字符为字符串
                     processed_values = []
                     for col in columns_in_order:
                         value = row[col]
-                        # 对于数值类型字段，将空字符串转换为None
-                        if col in ['unit_weight_kg', 'total_weight_kg'] and value == '':
-                            processed_values.append(None)
+                        # 对于数值类型字段，将空字符串转换为None，其他所有值转为字符串
+                        if col in ['unit_weight_kg', 'total_weight_kg']:
+                            if value == '':
+                                processed_values.append(None)
+                            else:
+                                # 强制转换为字符串，确保即使是特殊字符如'/'也能正确处理
+                                processed_values.append(str(value))
                         else:
                             processed_values.append(value)
 
