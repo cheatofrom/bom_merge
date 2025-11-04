@@ -5,9 +5,8 @@ import logging
 from services.auth_service import auth_service
 from services.cache_service import cache_service
 from auth_fastapi import get_current_user, get_admin_user, PermissionGrant, PermissionRevoke, PermissionCheck
-from db import get_db_connection
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from db import get_async_db_connection
+import asyncpg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,8 +14,8 @@ logger = logging.getLogger(__name__)
 def create_permission_routes(app: FastAPI):
     """创建权限管理相关的路由"""
     
-    def check_permission_internal(user_info: dict, resource_type: str, resource_id: str, required_permission: str = 'view') -> bool:
-        """内部权限检查函数（带Redis缓存优化）"""
+    async def check_permission_internal(user_info: dict, resource_type: str, resource_id: str, required_permission: str = 'view') -> bool:
+        """异步内部权限检查函数（带Redis缓存优化）"""
         try:
             # 管理员拥有所有权限
             if user_info['role'] == 'admin':
@@ -28,47 +27,42 @@ def create_permission_routes(app: FastAPI):
             # 尝试从缓存获取权限结果
             cached_result = cache_service.get(cache_key)
             if cached_result is not None:
-                logger.info(f"从缓存获取权限检查结果: {cache_key} = {cached_result}")  # 改为INFO级别便于调试
+                logger.info(f"从缓存获取权限检查结果: {cache_key} = {cached_result}")
                 return cached_result
             
             # 缓存未命中，查询数据库
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                try:
-                    # 只支持分类权限检查
-                    if resource_type == 'category':
-                        cursor.execute(
-                            "SELECT permission_type FROM user_category_permissions WHERE user_id = %s AND category_id = %s",
-                            (user_info['id'], resource_id)
-                        )
-                    else:
-                        # 无效的资源类型，缓存结果并返回False
-                        cache_service.set(cache_key, False, expire=300)  # 缓存5分钟
-                        return False
-                    
-                    permission = cursor.fetchone()
-                    if not permission:
-                        # 无权限，缓存结果并返回False
-                        cache_service.set(cache_key, False, expire=300)  # 缓存5分钟
-                        return False
-                    
-                    # 权限级别检查
-                    permission_levels = {'view': 1, 'edit': 2, 'delete': 3, 'admin': 4}
-                    user_level = permission_levels.get(permission['permission_type'], 0)
-                    required_level = permission_levels.get(required_permission, 1)
-                    
-                    result = user_level >= required_level
-                    
-                    # 缓存权限检查结果（5分钟）
-                    cache_service.set(cache_key, result, expire=300)
-                    logger.info(f"缓存权限检查结果: {cache_key} = {result}")  # 改为INFO级别便于调试
-                    
-                    return result
-                finally:
-                    cursor.close()
+            async with get_async_db_connection() as conn:
+                # 只支持分类权限检查
+                if resource_type == 'category':
+                    permission = await conn.fetchrow(
+                        "SELECT permission_type FROM user_category_permissions WHERE user_id = $1 AND category_id = $2",
+                        int(user_info['id']), int(resource_id)
+                    )
+                else:
+                    # 无效的资源类型，缓存结果并返回False
+                    await cache_service.set(cache_key, False, expire=300)  # 缓存5分钟
+                    return False
+                
+                if not permission:
+                    # 无权限，缓存结果并返回False
+                    await cache_service.set(cache_key, False, expire=300)  # 缓存5分钟
+                    return False
+                
+                # 权限级别检查
+                permission_levels = {'view': 1, 'edit': 2, 'delete': 3, 'admin': 4}
+                user_level = permission_levels.get(permission['permission_type'], 0)
+                required_level = permission_levels.get(required_permission, 1)
+                
+                result = user_level >= required_level
+                
+                # 缓存权限检查结果（5分钟）
+                await cache_service.set(cache_key, result, expire=300)
+                logger.info(f"缓存权限检查结果: {cache_key} = {result}")
+                
+                return result
             
-        except psycopg2.Error as e:
-            logger.error(f"Permission check error: {e}")
+        except asyncpg.Error as e:
+            logger.error(f"Async permission check error: {e}")
             return False
 
     
@@ -91,32 +85,28 @@ def create_permission_routes(app: FastAPI):
                     detail="无效的权限类型，只支持view和edit"
                 )
             
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-            
-            # 检查用户是否存在
-            cursor.execute("SELECT id FROM users WHERE id = %s", (permission_data.user_id,))
-            if not cursor.fetchone():
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="用户不存在"
+            async with get_async_db_connection() as conn:
+                # 检查用户是否存在
+                user_exists = await conn.fetchrow("SELECT id FROM users WHERE id = $1", permission_data.user_id)
+                if not user_exists:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="用户不存在"
+                    )
+                
+                # 检查分类是否存在
+                category_exists = await conn.fetchrow("SELECT id FROM categories WHERE id = $1", permission_data.category_id)
+                if not category_exists:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="分类不存在"
+                    )
+                
+                # 插入或更新分类权限
+                await conn.execute(
+                    "INSERT INTO user_category_permissions (user_id, category_id, permission_type, granted_by) VALUES ($1, $2, $3, $4) ON CONFLICT (user_id, category_id) DO UPDATE SET permission_type = EXCLUDED.permission_type, granted_by = EXCLUDED.granted_by, updated_at = CURRENT_TIMESTAMP",
+                    permission_data.user_id, permission_data.category_id, permission_data.permission_type, user_info['id']
                 )
-            
-            # 检查分类是否存在
-            cursor.execute("SELECT id FROM categories WHERE id = %s", (permission_data.category_id,))
-            if not cursor.fetchone():
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="分类不存在"
-                )
-            
-            # 插入或更新分类权限
-            cursor.execute(
-                "INSERT INTO user_category_permissions (user_id, category_id, permission_type, granted_by) VALUES (%s, %s, %s, %s) ON CONFLICT (user_id, category_id) DO UPDATE SET permission_type = EXCLUDED.permission_type, granted_by = EXCLUDED.granted_by, updated_at = CURRENT_TIMESTAMP",
-                (permission_data.user_id, permission_data.category_id, permission_data.permission_type, user_info['id'])
-            )
-            
-            conn.commit()
             
             # 清除相关权限缓存，确保权限变更立即生效
             try:
@@ -126,21 +116,21 @@ def create_permission_routes(app: FastAPI):
                 
                 for level in permission_levels:
                     cache_key = f"permission:{int(permission_data.user_id)}:category:{int(permission_data.category_id)}:{level}"
-                    if cache_service.delete(cache_key):
+                    if await cache_service.delete(cache_key):
                         deleted_total += 1
                         logger.info(f"清除权限缓存键: {cache_key}")
                 
                 # 也尝试使用模式匹配清除，以防有其他格式的缓存
                 pattern = f"permission:{int(permission_data.user_id)}:category:{int(permission_data.category_id)}:*"
-                pattern_deleted = cache_service.clear_pattern(pattern)
+                pattern_deleted = await cache_service.clear_pattern(pattern)
                 
                 # 清除用户分类缓存，确保用户看到的分类列表立即更新
                 user_categories_pattern = f"user_categories:{permission_data.user_id}:*"
-                user_categories_deleted = cache_service.clear_pattern(user_categories_pattern)
+                user_categories_deleted = await cache_service.clear_pattern(user_categories_pattern)
                 
                 # 清除用户文件列表缓存，确保文件显示立即更新
                 user_files_pattern = f"uploaded_files:{permission_data.user_id}:*"
-                user_files_deleted = cache_service.clear_pattern(user_files_pattern)
+                user_files_deleted = await cache_service.clear_pattern(user_files_pattern)
                 
                 logger.info(f"已清除用户 {permission_data.user_id} 对分类 {permission_data.category_id} 的权限缓存，直接删除 {deleted_total} 个，模式匹配删除 {pattern_deleted} 个，用户分类缓存删除 {user_categories_deleted} 个，用户文件缓存删除 {user_files_deleted} 个")
                 
@@ -185,22 +175,18 @@ def create_permission_routes(app: FastAPI):
                     detail="必须指定分类ID"
                 )
             
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-            
-            # 删除分类权限
-            cursor.execute(
-                "DELETE FROM user_category_permissions WHERE user_id = %s AND category_id = %s",
-                (permission_data.user_id, permission_data.category_id)
-            )
-            
-            if cursor.rowcount == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="权限不存在"
+            async with get_async_db_connection() as conn:
+                # 删除分类权限
+                result = await conn.execute(
+                    "DELETE FROM user_category_permissions WHERE user_id = $1 AND category_id = $2",
+                    permission_data.user_id, permission_data.category_id
                 )
-            
-            conn.commit()
+                
+                if result == "DELETE 0":
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="权限不存在"
+                    )
             
             # 清除相关权限缓存，确保权限变更立即生效
             try:
@@ -210,17 +196,17 @@ def create_permission_routes(app: FastAPI):
                 
                 for level in permission_levels:
                     cache_key = f"permission:{int(permission_data.user_id)}:category:{int(permission_data.category_id)}:{level}"
-                    if cache_service.delete(cache_key):
+                    if await cache_service.delete(cache_key):
                         deleted_total += 1
                         logger.info(f"清除权限缓存键: {cache_key}")
                 
                 # 也尝试使用模式匹配清除，以防有其他格式的缓存
                 pattern = f"permission:{int(permission_data.user_id)}:category:{int(permission_data.category_id)}:*"
-                pattern_deleted = cache_service.clear_pattern(pattern)
+                pattern_deleted = await cache_service.clear_pattern(pattern)
                 
                 # 清除用户分类缓存，确保用户看到的分类列表立即更新
                 user_categories_pattern = f"user_categories:{permission_data.user_id}:*"
-                user_categories_deleted = cache_service.clear_pattern(user_categories_pattern)
+                user_categories_deleted = await cache_service.clear_pattern(user_categories_pattern)
                 
                 logger.info(f"已清除用户 {permission_data.user_id} 对分类 {permission_data.category_id} 的权限缓存，直接删除 {deleted_total} 个，模式匹配删除 {pattern_deleted} 个，用户分类缓存删除 {user_categories_deleted} 个")
                 
@@ -256,39 +242,37 @@ def create_permission_routes(app: FastAPI):
     async def get_user_permissions(user_id: int, current_user_data = Depends(get_admin_user)):
         """获取用户的所有权限（带连接管理优化）"""
         try:
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                try:
-                    # 获取用户分类权限
-                    cursor.execute(
-                            """SELECT 
-                            ucp.id,
-                            ucp.category_id,
-                            ucp.permission_type,
-                            ucp.created_at,
-                            ucp.updated_at,
-                            u.username as granted_by_username,
-                            'category' as resource_type,
-                            c.name as resource_name
-                        FROM user_category_permissions ucp
-                        LEFT JOIN users u ON ucp.granted_by = u.id
-                        LEFT JOIN categories c ON ucp.category_id = c.id
-                        WHERE ucp.user_id = %s
-                        ORDER BY ucp.created_at DESC""",
-                            (user_id,)
-                        )
-                    permissions = cursor.fetchall()
-                    
-                    # 格式化日期
-                    for permission in permissions:
-                        if permission['created_at']:
-                            permission['created_at'] = permission['created_at'].isoformat()
-                    
-                    return {"permissions": permissions}
-                finally:
-                    cursor.close()
+            async with get_async_db_connection() as conn:
+                # 获取用户分类权限
+                permissions = await conn.fetch(
+                        """SELECT 
+                        ucp.id,
+                        ucp.category_id,
+                        ucp.permission_type,
+                        ucp.created_at,
+                        ucp.updated_at,
+                        u.username as granted_by_username,
+                        'category' as resource_type,
+                        c.name as resource_name
+                    FROM user_category_permissions ucp
+                    LEFT JOIN users u ON ucp.granted_by = u.id
+                    LEFT JOIN categories c ON ucp.category_id = c.id
+                    WHERE ucp.user_id = $1
+                    ORDER BY ucp.created_at DESC""",
+                        user_id
+                    )
+                
+                # 格式化日期
+                formatted_permissions = []
+                for permission in permissions:
+                    perm_dict = dict(permission)
+                    if perm_dict['created_at']:
+                        perm_dict['created_at'] = perm_dict['created_at'].isoformat()
+                    formatted_permissions.append(perm_dict)
+                
+                return {"permissions": formatted_permissions}
             
-        except psycopg2.Error as e:
+        except asyncpg.Error as e:
             logger.error(f"Get user permissions error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -302,109 +286,100 @@ def create_permission_routes(app: FastAPI):
         try:
             user_info, token = current_user_data
             
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                try:
-                    # 管理员可以访问所有资源
-                    if user_info['role'] == 'admin':
-                        # 获取所有文件
-                        cursor.execute(
-                            "SELECT file_unique_id as file_id, original_filename as filename, project_name, upload_time as created_at FROM uploaded_files ORDER BY upload_time DESC"
-                        )
-                        files = cursor.fetchall()
-                        
-                        # 获取所有合并项目
-                        cursor.execute(
-                            "SELECT id, merged_project_name as project_name, created_at FROM merged_projects ORDER BY created_at DESC"
-                        )
-                        merged_projects = cursor.fetchall()
-                        
-                        # 获取所有分类
-                        cursor.execute(
-                            "SELECT id, name, created_at FROM categories ORDER BY created_at DESC"
-                        )
-                        categories = cursor.fetchall()
-                        
-                        resources = {
-                            'files': files,
-                            'merged_projects': merged_projects,
-                            'categories': categories
-                        }
-                    else:
-                        # 普通用户只能访问有权限的分类资源
-                        cursor.execute(
-                            """SELECT 
-                                ucp.category_id,
-                                ucp.permission_type,
-                                c.name as category_name,
-                                c.created_at as category_created_at
-                            FROM user_category_permissions ucp
-                            LEFT JOIN categories c ON ucp.category_id = c.id
-                            WHERE ucp.user_id = %s
-                            ORDER BY ucp.created_at DESC""",
-                            (user_info['id'],)
-                        )
-                        permissions = cursor.fetchall()
-                        
-                        files = []
-                        merged_projects = []
-                        categories = []
-                        
-                        # 收集用户有权限的分类ID
-                        category_ids = []
-                        
-                        for perm in permissions:
-                            categories.append({
-                                'id': perm['category_id'],
-                                'name': perm['category_name'],
-                                'created_at': perm['category_created_at'],
-                                'permission': perm['permission_type']
-                            })
-                            category_ids.append(perm['category_id'])
-                        
-                        # 获取分类权限对应的文件
-                        if category_ids:
-                            cursor.execute(
-                                """SELECT DISTINCT 
-                                    uf.file_unique_id as file_id,
-                                    uf.original_filename as filename,
-                                    uf.project_name,
-                                    uf.upload_time as created_at
-                                FROM uploaded_files uf
-                                WHERE uf.category_id = ANY(%s)
-                                ORDER BY uf.upload_time DESC""",
-                                (category_ids,)
-                            )
-                            category_files = cursor.fetchall()
-                            
-                            # 添加分类下的文件到文件列表（避免重复）
-                            existing_file_ids = {f['file_id'] for f in files}
-                            for cf in category_files:
-                                if cf['file_id'] not in existing_file_ids:
-                                    files.append({
-                                        'file_id': cf['file_id'],
-                                        'filename': cf['filename'],
-                                        'created_at': cf['created_at'],
-                                        'permission': 'view'  # 通过分类权限获得的默认权限
-                                    })
-                        
-                        resources = {
-                            'files': files,
-                            'merged_projects': merged_projects,
-                            'categories': categories
-                        }
+            async with get_async_db_connection() as conn:
+                # 管理员可以访问所有资源
+                if user_info['role'] == 'admin':
+                    # 获取所有文件
+                    files = await conn.fetch(
+                        "SELECT file_unique_id as file_id, original_filename as filename, project_name, upload_time as created_at FROM uploaded_files ORDER BY upload_time DESC"
+                    )
                     
-                    # 格式化日期
-                    for resource_type in resources:
-                        for resource in resources[resource_type]:
-                            if resource.get('created_at'):
-                                resource['created_at'] = resource['created_at'].isoformat()
+                    # 获取所有合并项目
+                    merged_projects = await conn.fetch(
+                        "SELECT id, merged_project_name as project_name, created_at FROM merged_projects ORDER BY created_at DESC"
+                    )
                     
-                    return resources
-                finally:
-                    cursor.close()
+                    # 获取所有分类
+                    categories = await conn.fetch(
+                        "SELECT id, name, created_at FROM categories ORDER BY created_at DESC"
+                    )
+                    
+                    resources = {
+                        'files': [dict(f) for f in files],
+                        'merged_projects': [dict(mp) for mp in merged_projects],
+                        'categories': [dict(c) for c in categories]
+                    }
+                else:
+                    # 普通用户只能访问有权限的分类资源
+                    permissions = await conn.fetch(
+                        """SELECT 
+                            ucp.category_id,
+                            ucp.permission_type,
+                            c.name as category_name,
+                            c.created_at as category_created_at
+                        FROM user_category_permissions ucp
+                        LEFT JOIN categories c ON ucp.category_id = c.id
+                        WHERE ucp.user_id = $1
+                        ORDER BY ucp.created_at DESC""",
+                        user_info['id']
+                    )
+                    
+                    files = []
+                    merged_projects = []
+                    categories = []
+                    
+                    # 收集用户有权限的分类ID
+                    category_ids = []
+                    
+                    for perm in permissions:
+                        categories.append({
+                            'id': perm['category_id'],
+                            'name': perm['category_name'],
+                            'created_at': perm['category_created_at'],
+                            'permission': perm['permission_type']
+                        })
+                        category_ids.append(perm['category_id'])
+                    
+                    # 获取分类权限对应的文件
+                    if category_ids:
+                        category_files = await conn.fetch(
+                            """SELECT DISTINCT 
+                                uf.file_unique_id as file_id,
+                                uf.original_filename as filename,
+                                uf.project_name,
+                                uf.upload_time as created_at
+                            FROM uploaded_files uf
+                            WHERE uf.category_id = ANY($1)
+                            ORDER BY uf.upload_time DESC""",
+                            category_ids
+                        )
+                        
+                        # 添加分类下的文件到文件列表（避免重复）
+                        existing_file_ids = {f['file_id'] for f in files}
+                        for cf in category_files:
+                            if cf['file_id'] not in existing_file_ids:
+                                files.append({
+                                    'file_id': cf['file_id'],
+                                    'filename': cf['filename'],
+                                    'created_at': cf['created_at'],
+                                    'permission': 'view'  # 通过分类权限获得的默认权限
+                                })
+                    
+                    resources = {
+                        'files': files,
+                        'merged_projects': merged_projects,
+                        'categories': categories
+                    }
+                
+                # 格式化日期
+                for resource_type in resources:
+                    for resource in resources[resource_type]:
+                        if resource.get('created_at'):
+                            resource['created_at'] = resource['created_at'].isoformat()
+                
+                return resources
             
-        except psycopg2.Error as e:
+        except asyncpg.Error as e:
             logger.error(f"Get my resources error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -418,7 +393,7 @@ def create_permission_routes(app: FastAPI):
         try:
             user_info, token = current_user_data
             
-            has_permission = check_permission_internal(
+            has_permission = await check_permission_internal_async(
                 user_info, 
                 permission_data.resource_type, 
                 permission_data.resource_id, 

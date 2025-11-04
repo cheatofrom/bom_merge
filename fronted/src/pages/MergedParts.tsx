@@ -546,7 +546,7 @@ const MergedParts: React.FC = () => {
             </div>
             <input
               type="text"
-              placeholder="搜索零件名称、代号、规格、材料或备注..."
+              placeholder="搜索零件名称、代号、规格、材料、备注、"
               className="w-full pl-10 pr-10 py-2 rounded-md border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
               value={searchText}
               onChange={(e) => setSearchText(e.target.value)}
@@ -599,7 +599,8 @@ const MergedParts: React.FC = () => {
                     {[
                       '层级', '零件代号', '零件名称', '规格', '版本号', '材料',
                       '单层级用量', '单重(kg)', '总重(kg)', '零件属性', '图幅',
-                      '参考号', '采购状态', '工艺路线', '备注', '项目名称'
+                      '参考号', '采购状态', '工艺路线', '备注', '序号', 'ERP存货号', 
+                      '状态类型', '母件', '工厂', 'PBOM说明', '项目名称'
                     ].map((header, idx) => (
                       <th
                         key={idx}
@@ -877,6 +878,108 @@ const MergedParts: React.FC = () => {
                           ) : (
                             <span className={hasConflict && conflictInfo?.conflictFields.includes('remark') ? 'text-red-600 font-bold' : ''}>
                               {part.remark}
+                            </span>
+                          )}
+                        </td>
+                        
+                        {/* 序号 */}
+                        <td className="border px-4 py-2 text-center whitespace-nowrap">
+                          {editMode ? (
+                            <input
+                              type="text"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(50, ((editedParts[part.id]?.serial_number !== undefined ? editedParts[part.id].serial_number : part.serial_number) || '').toString().length * 8 + 32)}px`}}
+                              value={editedParts[part.id]?.serial_number !== undefined ? editedParts[part.id].serial_number : part.serial_number}
+                              onChange={(e) => handleCellChange(part.id, 'serial_number', e.target.value)}
+                            />
+                          ) : (
+                            <span className={hasConflict && conflictInfo?.conflictFields.includes('serial_number') ? 'text-red-600 font-bold' : ''}>
+                              {part.serial_number}
+                            </span>
+                          )}
+                        </td>
+                        
+                        {/* ERP存货号 */}
+                        <td className="border px-4 py-2 text-center whitespace-nowrap">
+                          {editMode ? (
+                            <input
+                              type="text"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(80, ((editedParts[part.id]?.erp_inventory_number !== undefined ? editedParts[part.id].erp_inventory_number : part.erp_inventory_number) || '').toString().length * 8 + 32)}px`}}
+                              value={editedParts[part.id]?.erp_inventory_number !== undefined ? editedParts[part.id].erp_inventory_number : part.erp_inventory_number}
+                              onChange={(e) => handleCellChange(part.id, 'erp_inventory_number', e.target.value)}
+                            />
+                          ) : (
+                            <span className={hasConflict && conflictInfo?.conflictFields.includes('erp_inventory_number') ? 'text-red-600 font-bold' : ''}>
+                              {part.erp_inventory_number}
+                            </span>
+                          )}
+                        </td>
+                        
+                        {/* 状态类型 */}
+                        <td className="border px-4 py-2 text-center whitespace-nowrap">
+                          {editMode ? (
+                            <input
+                              type="text"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.status_type !== undefined ? editedParts[part.id].status_type : part.status_type) || '').toString().length * 8 + 32)}px`}}
+                              value={editedParts[part.id]?.status_type !== undefined ? editedParts[part.id].status_type : part.status_type}
+                              onChange={(e) => handleCellChange(part.id, 'status_type', e.target.value)}
+                            />
+                          ) : (
+                            <span className={hasConflict && conflictInfo?.conflictFields.includes('status_type') ? 'text-red-600 font-bold' : ''}>
+                              {part.status_type}
+                            </span>
+                          )}
+                        </td>
+                        
+                        {/* 母件 */}
+                        <td className="border px-4 py-2 text-center whitespace-nowrap">
+                          {editMode ? (
+                            <input
+                              type="text"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(60, ((editedParts[part.id]?.parent_part !== undefined ? editedParts[part.id].parent_part : part.parent_part) || '').toString().length * 8 + 32)}px`}}
+                              value={editedParts[part.id]?.parent_part !== undefined ? editedParts[part.id].parent_part : part.parent_part}
+                              onChange={(e) => handleCellChange(part.id, 'parent_part', e.target.value)}
+                            />
+                          ) : (
+                            <span className={hasConflict && conflictInfo?.conflictFields.includes('parent_part') ? 'text-red-600 font-bold' : ''}>
+                              {part.parent_part}
+                            </span>
+                          )}
+                        </td>
+                        
+                        {/* 工厂 */}
+                        <td className="border px-4 py-2 text-center whitespace-nowrap">
+                          {editMode ? (
+                            <input
+                              type="text"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(50, ((editedParts[part.id]?.factory !== undefined ? editedParts[part.id].factory : part.factory) || '').toString().length * 8 + 32)}px`}}
+                              value={editedParts[part.id]?.factory !== undefined ? editedParts[part.id].factory : part.factory}
+                              onChange={(e) => handleCellChange(part.id, 'factory', e.target.value)}
+                            />
+                          ) : (
+                            <span className={hasConflict && conflictInfo?.conflictFields.includes('factory') ? 'text-red-600 font-bold' : ''}>
+                              {part.factory}
+                            </span>
+                          )}
+                        </td>
+                        
+                        {/* PBOM说明 */}
+                        <td className="border px-4 py-2 text-center whitespace-nowrap">
+                          {editMode ? (
+                            <input
+                              type="text"
+                              className="bg-transparent border-none outline-none text-center whitespace-nowrap"
+                              style={{width: `${Math.max(100, ((editedParts[part.id]?.pbom_description !== undefined ? editedParts[part.id].pbom_description : part.pbom_description) || '').toString().length * 8 + 32)}px`}}
+                              value={editedParts[part.id]?.pbom_description !== undefined ? editedParts[part.id].pbom_description : part.pbom_description}
+                              onChange={(e) => handleCellChange(part.id, 'pbom_description', e.target.value)}
+                            />
+                          ) : (
+                            <span className={hasConflict && conflictInfo?.conflictFields.includes('pbom_description') ? 'text-red-600 font-bold' : ''}>
+                              {part.pbom_description}
                             </span>
                           )}
                         </td>

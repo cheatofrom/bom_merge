@@ -81,7 +81,13 @@ const MergedProjectParts: React.FC = () => {
         (part.part_name && part.part_name.toLowerCase().includes(lowerSearchText)) ||
         (part.spec && part.spec.toLowerCase().includes(lowerSearchText)) ||
         (part.material && part.material.toLowerCase().includes(lowerSearchText)) ||
-        (part.remark && part.remark.toLowerCase().includes(lowerSearchText))
+        (part.remark && part.remark.toLowerCase().includes(lowerSearchText)) ||
+        (part.serial_number && part.serial_number.toLowerCase().includes(lowerSearchText)) ||
+        (part.erp_inventory_number && part.erp_inventory_number.toLowerCase().includes(lowerSearchText)) ||
+        (part.status_type && part.status_type.toLowerCase().includes(lowerSearchText)) ||
+        (part.parent_part && part.parent_part.toLowerCase().includes(lowerSearchText)) ||
+        (part.factory && part.factory.toLowerCase().includes(lowerSearchText)) ||
+        (part.pbom_description && part.pbom_description.toLowerCase().includes(lowerSearchText))
       );
     });
   }, [parts, searchText]);
@@ -361,6 +367,12 @@ const MergedProjectParts: React.FC = () => {
                   <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '6%' }}>采购状态</th>
                   <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '8%' }}>工艺路线</th>
                   <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '10%' }}>备注</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '5%' }}>序号</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '8%' }}>ERP存货号</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '6%' }}>状态类型</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '6%' }}>母件</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '5%' }}>工厂</th>
+                  <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '10%' }}>PBOM说明</th>
                   <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider" style={{ width: '5%' }}>操作</th>
                 </tr>
               </thead>
@@ -383,6 +395,12 @@ const MergedProjectParts: React.FC = () => {
                       <td className="px-6 py-4 text-sm text-gray-900">{part.purchase_status}</td>
                       <td className="px-6 py-4 text-sm text-gray-900">{part.process_route}</td>
                       <td className="px-6 py-4 text-sm text-gray-900 break-words" style={{ maxWidth: '200px' }}>{part.remark}</td>
+                      <td className="px-6 py-4 text-sm text-gray-900">{part.serial_number}</td>
+                      <td className="px-6 py-4 text-sm text-gray-900">{part.erp_inventory_number}</td>
+                      <td className="px-6 py-4 text-sm text-gray-900">{part.status_type}</td>
+                      <td className="px-6 py-4 text-sm text-gray-900">{part.parent_part}</td>
+                      <td className="px-6 py-4 text-sm text-gray-900">{part.factory}</td>
+                      <td className="px-6 py-4 text-sm text-gray-900 break-words" style={{ maxWidth: '200px' }}>{part.pbom_description}</td>
                       <td className="px-6 py-4 text-sm text-gray-900">
                         <button
                           onClick={() => handleShowDeleteConfirm(part.id, part.part_name, part.part_code)}

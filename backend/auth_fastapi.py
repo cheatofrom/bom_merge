@@ -5,8 +5,7 @@ from typing import Optional, Dict, Any
 import logging
 from services.auth_service import auth_service
 from datetime import datetime
-from psycopg2.extras import RealDictCursor
-from psycopg2 import Error
+import asyncpg
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,31 +45,39 @@ class RefreshTokenRequest(BaseModel):
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """获取当前用户信息"""
     token = credentials.credentials
+    logger.info(f"[AUTH] 验证用户令牌，令牌长度: {len(token) if token else 0}")
+    
     is_valid, user_info = auth_service.validate_session(token)
     
     if not is_valid:
+        logger.warning(f"[AUTH] 令牌验证失败 - 有效: {is_valid}, 用户信息: {user_info}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效或过期的令牌",
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    logger.info(f"[AUTH] 令牌验证成功 - 用户ID: {user_info.get('id')}, 用户名: {user_info.get('username')}, 角色: {user_info.get('role')}")
     return user_info, token
 
 async def get_admin_user(current_user_data = Depends(get_current_user)):
     """获取管理员用户"""
     user_info, token = current_user_data
     
+    logger.info(f"[AUTH] 检查管理员权限 - 用户ID: {user_info.get('id')}, 角色: {user_info.get('role')}")
+    
     if user_info['role'] != 'admin':
+        logger.warning(f"[AUTH] 管理员权限检查失败 - 用户ID: {user_info.get('id')}, 角色: {user_info.get('role')}, 需要角色: admin")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="需要管理员权限"
         )
     
+    logger.info(f"[AUTH] 管理员权限检查通过 - 用户ID: {user_info.get('id')}")
     return user_info, token
 
-def check_resource_permission(resource_type: str, resource_id: str, required_permission: str = 'view'):
-    """检查用户是否有特定资源的权限（带连接管理优化）"""
+async def check_resource_permission_async(resource_type: str, resource_id: str, required_permission: str = 'view'):
+    """异步检查用户是否有特定资源的权限"""
     async def permission_checker(current_user_data = Depends(get_current_user)):
         user_info, token = current_user_data
         
@@ -79,62 +86,141 @@ def check_resource_permission(resource_type: str, resource_id: str, required_per
             return True
         
         try:
-            from db import get_db_connection
+            from db import get_async_db_connection
             
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-                try:
-                    # 根据资源类型查询权限
-                    if resource_type == 'file':
-                        # 通过文件所属分类检查权限
-                        cursor.execute(
-                            """SELECT ucp.permission_type 
-                               FROM user_category_permissions ucp
-                               JOIN uploaded_files uf ON ucp.category_id = uf.category_id
-                               WHERE ucp.user_id = %s AND uf.file_unique_id = %s""",
-                            (user_info['id'], resource_id)
-                        )
-                    elif resource_type == 'merged_project':
-                        # 通过合并项目所属分类检查权限
-                        cursor.execute(
-                            """SELECT ucp.permission_type 
-                               FROM user_category_permissions ucp
-                               JOIN merged_projects mp ON ucp.category_id = mp.category_id
-                               WHERE ucp.user_id = %s AND mp.id = %s""",
-                            (user_info['id'], resource_id)
-                        )
-                    elif resource_type == 'category':
-                        cursor.execute(
-                            "SELECT permission_type FROM user_category_permissions WHERE user_id = %s AND category_id = %s",
-                            (user_info['id'], resource_id)
-                        )
+            async with get_async_db_connection() as conn:
+                # 根据资源类型查询权限
+                logger.info(f"[PERMISSION] 检查权限 - 用户ID: {user_info['id']}, 资源类型: {resource_type}, 资源ID: {resource_id}, 需要权限: {required_permission}")
+                
+                if resource_type == 'file':
+                    # 通过文件所属分类检查权限
+                    logger.info(f"[PERMISSION] 检查文件权限 - 用户ID: {user_info['id']}, 文件ID: {resource_id}")
+                    permission = await conn.fetchrow(
+                        """SELECT ucp.permission_type, uf.category_id, uf.original_filename
+                           FROM user_category_permissions ucp
+                           JOIN uploaded_files uf ON ucp.category_id = uf.category_id
+                           WHERE ucp.user_id = $1 AND uf.file_unique_id = $2""",
+                        user_info['id'], resource_id
+                    )
+                    if permission:
+                        logger.info(f"[PERMISSION] 文件权限查询成功 - 分类ID: {permission['category_id']}, 文件名: {permission['original_filename']}, 权限: {permission['permission_type']}")
                     else:
-                        raise HTTPException(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            detail="无效的资源类型"
-                        )
-                    
-                    permission = cursor.fetchone()
-                    if not permission:
-                        raise HTTPException(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            detail="没有访问权限"
-                        )
-                    
-                    # 权限级别检查
-                    permission_levels = {'view': 1, 'edit': 2, 'delete': 3, 'admin': 4}
-                    user_level = permission_levels.get(permission['permission_type'], 0)
-                    required_level = permission_levels.get(required_permission, 1)
-                    
-                    if user_level < required_level:
-                        raise HTTPException(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            detail="权限不足"
-                        )
-                    
-                    return True
-                finally:
-                    cursor.close()
+                        logger.warning(f"[PERMISSION] 文件权限查询失败 - 用户ID: {user_info['id']}, 文件ID: {resource_id}")
+                elif resource_type == 'merged_project':
+                    # 通过合并项目所属分类检查权限
+                    permission = await conn.fetchrow(
+                        """SELECT ucp.permission_type 
+                           FROM user_category_permissions ucp
+                           JOIN merged_projects mp ON ucp.category_id = mp.category_id
+                           WHERE ucp.user_id = $1 AND mp.id = $2""",
+                        user_info['id'], resource_id
+                    )
+                elif resource_type == 'category':
+                    permission = await conn.fetchrow(
+                        "SELECT permission_type FROM user_category_permissions WHERE user_id = $1 AND category_id = $2",
+                        user_info['id'], resource_id
+                    )
+                else:
+                    logger.error(f"[PERMISSION] 无效的资源类型: {resource_type}")
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="无效的资源类型"
+                    )
+                
+                if not permission:
+                    logger.warning(f"[PERMISSION] 没有访问权限 - 用户ID: {user_info['id']}, 资源类型: {resource_type}, 资源ID: {resource_id}")
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="没有访问权限"
+                    )
+                
+                # 权限级别检查
+                permission_levels = {'view': 1, 'edit': 2, 'delete': 3, 'admin': 4}
+                user_level = permission_levels.get(permission['permission_type'], 0)
+                required_level = permission_levels.get(required_permission, 1)
+                
+                logger.info(f"[PERMISSION] 权限级别检查 - 用户权限: {permission['permission_type']} (级别: {user_level}), 需要权限: {required_permission} (级别: {required_level})")
+                
+                if user_level < required_level:
+                    logger.warning(f"[PERMISSION] 权限不足 - 用户权限级别: {user_level}, 需要级别: {required_level}")
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="权限不足"
+                    )
+                
+                return True
+            
+        except Exception as e:
+            logger.error(f"Permission check error: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="权限检查失败"
+            )
+    
+    return permission_checker
+
+# 异步权限检查函数（唯一实现）
+def check_resource_permission(resource_type: str, resource_id: str, required_permission: str = 'view'):
+    """检查用户是否有特定资源的权限（异步实现）"""
+    async def permission_checker(current_user_data = Depends(get_current_user)):
+        user_info, token = current_user_data
+        
+        # 管理员拥有所有权限
+        if user_info['role'] == 'admin':
+            return True
+        
+        try:
+            from db import get_async_db_connection
+            
+            async with get_async_db_connection() as conn:
+                # 根据资源类型查询权限
+                if resource_type == 'file':
+                    # 通过文件所属分类检查权限
+                    permission = await conn.fetchrow(
+                        """SELECT ucp.permission_type 
+                           FROM user_category_permissions ucp
+                           JOIN uploaded_files uf ON ucp.category_id = uf.category_id
+                           WHERE ucp.user_id = $1 AND uf.file_unique_id = $2""",
+                        user_info['id'], resource_id
+                    )
+                elif resource_type == 'merged_project':
+                    # 通过合并项目所属分类检查权限
+                    permission = await conn.fetchrow(
+                        """SELECT ucp.permission_type 
+                           FROM user_category_permissions ucp
+                           JOIN merged_projects mp ON ucp.category_id = mp.category_id
+                           WHERE ucp.user_id = $1 AND mp.id = $2""",
+                        user_info['id'], resource_id
+                    )
+                elif resource_type == 'category':
+                    permission = await conn.fetchrow(
+                        "SELECT permission_type FROM user_category_permissions WHERE user_id = $1 AND category_id = $2",
+                        user_info['id'], resource_id
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="无效的资源类型"
+                    )
+                
+                if not permission:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="没有访问权限"
+                    )
+                
+                # 权限级别检查
+                permission_levels = {'view': 1, 'edit': 2, 'delete': 3, 'admin': 4}
+                user_level = permission_levels.get(permission['permission_type'], 0)
+                required_level = permission_levels.get(required_permission, 1)
+                
+                if user_level < required_level:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="权限不足"
+                    )
+                
+                return True
             
         except Exception as e:
             logger.error(f"Permission check error: {e}")
@@ -171,8 +257,8 @@ def create_auth_routes(app: FastAPI):
                     detail="请输入有效的邮箱地址"
                 )
             
-            # 注册用户
-            success, message, user_id = auth_service.register_user(
+            # 使用异步方法注册用户
+            success, message, user_id = await auth_service.register_user_async(
                 user_data.username, 
                 user_data.email, 
                 user_data.password, 
@@ -213,21 +299,15 @@ def create_auth_routes(app: FastAPI):
             ip_address = request.client.host
             user_agent = request.headers.get('User-Agent')
             
-            # 登录验证
-            success, message, user_info = auth_service.login_user(user_data.username, user_data.password)
+            # 使用异步方法登录
+            success, message, user_info = await auth_service.login_user_async(
+                user_data.username, 
+                user_data.password,
+                ip_address,
+                user_agent
+            )
             
             if success:
-                # 记录登录日志
-                auth_service.log_user_activity(
-                    user_info['id'], 
-                    'login', 
-                    'user', 
-                    str(user_info['id']),
-                    {'ip_address': ip_address},
-                    ip_address,
-                    user_agent
-                )
-                
                 return {
                     "message": message,
                     "user": {
@@ -257,11 +337,17 @@ def create_auth_routes(app: FastAPI):
             )
     
     @app.post("/api/auth/logout")
-    async def logout(current_user_data = Depends(get_current_user)):
+    async def logout(request: Request, current_user_data = Depends(get_current_user)):
         """用户登出"""
         try:
             user_info, token = current_user_data
-            success, message = auth_service.logout_user(token)
+            
+            # 获取客户端信息
+            ip_address = request.client.host
+            user_agent = request.headers.get('User-Agent')
+            
+            # 使用异步方法登出
+            success, message = await auth_service.logout_user_async(token, ip_address, user_agent)
             
             if success:
                 return {"message": message}
@@ -306,89 +392,87 @@ def create_auth_routes(app: FastAPI):
     async def get_users(page: int = 1, per_page: int = 10, current_user_data = Depends(get_admin_user)):
         """获取用户列表（管理员）"""
         try:
-            from db import get_db_connection
+            from db import get_async_db_connection
             
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            offset = (page - 1) * per_page
-            
-            # 获取用户列表
-            cursor.execute(
-                "SELECT id, username, email, full_name, role, is_active, created_at, last_login FROM users ORDER BY created_at DESC LIMIT %s OFFSET %s",
-                (per_page, offset)
-            )
-            users = cursor.fetchall()
-            
-            # 获取总数
-            cursor.execute("SELECT COUNT(*) as total FROM users")
-            total = cursor.fetchone()['total']
-            
-            # 格式化日期
-            for user in users:
-                if user['created_at']:
-                    user['created_at'] = user['created_at'].isoformat()
-                if user['last_login']:
-                    user['last_login'] = user['last_login'].isoformat()
-            
-            return {
-                "users": users,
-                "pagination": {
-                    "page": page,
-                    "per_page": per_page,
-                    "total": total,
-                    "pages": (total + per_page - 1) // per_page
+            async with get_async_db_connection() as conn:
+                offset = (page - 1) * per_page
+                
+                # 获取用户列表
+                users = await conn.fetch(
+                    "SELECT id, username, email, full_name, role, is_active, created_at, last_login FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                    per_page, offset
+                )
+                
+                # 获取总数
+                total = await conn.fetchval("SELECT COUNT(*) FROM users")
+                
+                # 格式化日期和转换结果
+                users_list = []
+                for user in users:
+                    user_dict = dict(user)
+                    if user_dict['created_at']:
+                        user_dict['created_at'] = user_dict['created_at'].isoformat()
+                    if user_dict['last_login']:
+                        user_dict['last_login'] = user_dict['last_login'].isoformat()
+                    users_list.append(user_dict)
+                
+                return {
+                    "users": users_list,
+                    "pagination": {
+                        "page": page,
+                        "per_page": per_page,
+                        "total": total,
+                        "pages": (total + per_page - 1) // per_page
+                    }
                 }
-            }
-            
+                
         except Exception as e:
             logger.error(f"Get users error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="获取用户列表失败"
             )
-
     
     @app.put("/api/auth/users/{user_id}/toggle-status")
-    async def toggle_user_status(user_id: int, current_user_data = Depends(get_admin_user)):
+    async def toggle_user_status(request: Request, user_id: int, current_user_data = Depends(get_admin_user)):
         """切换用户状态（启用/禁用）"""
         try:
-            from db import get_db_connection
+            from db import get_async_db_connection
             
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            # 获取当前用户状态
-            cursor.execute("SELECT is_active FROM users WHERE id = %s", (user_id,))
-            user = cursor.fetchone()
-            
-            if not user:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="用户不存在"
+            async with get_async_db_connection() as conn:
+                # 获取当前用户状态
+                user = await conn.fetchrow("SELECT is_active FROM users WHERE id = $1", user_id)
+                
+                if not user:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="用户不存在"
+                    )
+                
+                # 切换状态
+                new_status = not user['is_active']
+                await conn.execute(
+                    "UPDATE users SET is_active = $1 WHERE id = $2",
+                    new_status, user_id
                 )
-            
-            # 切换状态
-            new_status = not user['is_active']
-            cursor.execute(
-                "UPDATE users SET is_active = %s WHERE id = %s",
-                (new_status, user_id)
-            )
-            conn.commit()
-            
-            # 记录操作日志
-            user_info, token = current_user_data
-            auth_service.log_user_activity(
-                user_info['id'],
-                'toggle_user_status',
-                'user',
-                str(user_id),
-                {'new_status': new_status}
-            )
-            
-            status_text = '启用' if new_status else '禁用'
-            return {"message": f"用户已{status_text}"}
-            
+                
+                # 记录操作日志
+                user_info, token = current_user_data
+                ip_address = request.client.host
+                user_agent = request.headers.get('User-Agent')
+                await auth_service.log_user_activity_async(
+                    user_info['id'],
+                    'toggle_user_status',
+                    'user',
+                    str(user_id),
+                    {'new_status': new_status},
+                    ip_address,
+                    user_agent
+                )
+                
+                status_text = '启用' if new_status else '禁用'
+                return {"message": f"用户已{status_text}"}
+                
         except HTTPException:
             raise
         except Exception as e:
@@ -399,59 +483,58 @@ def create_auth_routes(app: FastAPI):
             )
     
     @app.delete("/api/auth/users/{user_id}")
-    async def delete_user(user_id: int, current_user_data = Depends(get_admin_user)):
+    async def delete_user(request: Request, user_id: int, current_user_data = Depends(get_admin_user)):
         """删除用户（管理员）"""
         try:
-            from db import get_db_connection
+            from db import get_async_db_connection
             
-            with get_db_connection() as conn:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            # 检查要删除的用户是否存在
-            cursor.execute("SELECT id, username, role FROM users WHERE id = %s", (user_id,))
-            target_user = cursor.fetchone()
-            
-            if not target_user:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail="用户不存在"
+            async with get_async_db_connection() as conn:
+                # 检查要删除的用户是否存在
+                target_user = await conn.fetchrow("SELECT id, username, role FROM users WHERE id = $1", user_id)
+                
+                if not target_user:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="用户不存在"
+                    )
+                
+                # 防止删除管理员账户
+                if target_user['role'] == 'admin':
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="不能删除管理员账户"
+                    )
+                
+                # 删除用户相关的权限记录
+                await conn.execute("DELETE FROM user_category_permissions WHERE user_id = $1", user_id)
+                
+                # 清理用户的Redis会话
+                cache_pattern = f"bom:session:{user_id}:"
+                from services.cache_service import cache_service
+                await cache_service.clear_pattern(cache_pattern)
+                
+                # 删除用户活动日志
+                await conn.execute("DELETE FROM user_activity_logs WHERE user_id = $1", user_id)
+                
+                # 删除用户
+                await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+                
+                # 记录操作日志
+                user_info, token = current_user_data
+                ip_address = request.client.host
+                user_agent = request.headers.get('User-Agent')
+                await auth_service.log_user_activity_async(
+                    user_info['id'],
+                    'delete_user',
+                    'user',
+                    str(user_id),
+                    {'deleted_username': target_user['username']},
+                    ip_address,
+                    user_agent
                 )
-            
-            # 防止删除管理员账户
-            if target_user['role'] == 'admin':
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="不能删除管理员账户"
-                )
-            
-            # 删除用户相关的权限记录
-            cursor.execute("DELETE FROM user_category_permissions WHERE user_id = %s", (user_id,))
-
-            # 清理用户的Redis会话
-            cache_pattern = f"bom:session:{user_id}:*"
-            from services.cache_service import cache_service
-            cache_service.clear_pattern(cache_pattern)
-
-            # 删除用户活动日志
-            cursor.execute("DELETE FROM user_activity_logs WHERE user_id = %s", (user_id,))
-
-            # 删除用户
-            cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
-            
-            conn.commit()
-            
-            # 记录操作日志
-            user_info, token = current_user_data
-            auth_service.log_user_activity(
-                user_info['id'],
-                'delete_user',
-                'user',
-                str(user_id),
-                {'deleted_username': target_user['username']}
-            )
-            
-            return {"message": f"用户 {target_user['username']} 已删除"}
-            
+                
+                return {"message": f"用户 {target_user['username']} 已删除"}
+                
         except HTTPException:
             raise
         except Exception as e:
@@ -477,7 +560,9 @@ def create_auth_routes(app: FastAPI):
             new_access_token = auth_service.generate_jwt_token(
                 user_info['id'],
                 user_info['username'],
-                user_info['role']
+                user_info['role'],
+                user_info.get('email', ''),
+                user_info.get('full_name', '')
             )
             
             return {

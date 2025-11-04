@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from db import get_connection, get_async_db_connection
+from db import get_async_db_connection
 from typing import Optional, List
+from datetime import datetime
 
 router = APIRouter()
 
@@ -52,15 +53,18 @@ async def get_project_note(project_name: str):
     """获取指定项目的备注（路径参数）"""
     try:
         # 记录请求的项目名称，用于调试
-        print(f"路径参数请求的项目名称: {project_name}")
+        print(f"[DEBUG] 路径参数请求的项目名称: {project_name}")
+        print(f"[DEBUG] 请求时间: {datetime.now().isoformat()}")
         
         # 使用通用函数获取项目备注
-        return await get_project_note_internal(project_name)
+        result = await get_project_note_internal(project_name)
+        print(f"[DEBUG] 项目备注查询成功，返回数据: {result}")
+        return result
     except Exception as e:
         # 记录详细的错误信息
         import traceback
         error_detail = f"获取项目备注失败: {str(e)}\n详细信息: {traceback.format_exc()}"
-        print(error_detail)
+        print(f"[ERROR] {error_detail}")
         raise HTTPException(status_code=500, detail=f"获取项目备注失败: {str(e)}")
 
 @router.get("/project_notes/by_name", response_model=ProjectNoteResponse)

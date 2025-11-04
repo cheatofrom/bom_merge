@@ -233,7 +233,11 @@ export const refreshToken = async (): Promise<{ access_token: string }> => {
 
 // 获取用户列表（管理员）
 export const getUsers = async (): Promise<User[]> => {
-  const response = await authApi.get<{users: User[], pagination: any}>('/api/auth/users');
+  const response = await authApi.get<{users: User[], pagination: any}>('/api/auth/users', {
+    params: {
+      per_page: 1000  // 获取最多1000个用户，相当于获取所有用户
+    }
+  });
   return response.data.users;
 };
 

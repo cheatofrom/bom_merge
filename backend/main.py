@@ -1,16 +1,16 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, Query, Request, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from services.excel_import import import_excel_to_db, import_excel_to_db_async
+from services.excel_import import  import_excel_to_db_async
 from services.cache_service import cache_service
-from db import get_connection, get_db_connection, get_async_db_connection, get_pool_status, perform_pool_health_check, get_async_pool_status, perform_async_pool_health_check
-import psycopg2
+from db import get_async_db_connection, get_async_pool_status, perform_async_pool_health_check
 import os
 import traceback
 import logging
 from datetime import datetime
 from project_notes import router as project_notes_router
-from auth_fastapi import create_auth_routes, get_current_user
+from auth_fastapi import create_auth_routes, get_current_user, get_admin_user
 from permission_fastapi import create_permission_routes
 
 # 配置日志
@@ -24,7 +24,28 @@ logging.basicConfig(
 )
 logger = logging.getLogger("upload_api")
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理器"""
+    # 启动时初始化缓存服务
+    try:
+        await cache_service.initialize()
+        logger.info("缓存服务初始化成功")
+    except Exception as e:
+        logger.error(f"缓存服务初始化失败: {e}")
+        # 即使缓存初始化失败，应用也应该继续运行，只是使用内存缓存
+        logger.info("应用将继续运行，使用内存缓存作为备选方案")
+    
+    yield  # 应用运行期间
+    
+    # 关闭时清理资源
+    try:
+        await cache_service.close()
+        logger.info("缓存服务已关闭")
+    except Exception as e:
+        logger.error(f"关闭缓存服务时出错: {e}")
+
+app = FastAPI(lifespan=lifespan)
 
 # 添加CORS中间件，允许跨域请求
 app.add_middleware(
@@ -45,9 +66,9 @@ create_auth_routes(app)
 create_permission_routes(app)
 
 # 导入文件服务模块
-from services.file_service import get_uploaded_files, get_uploaded_files_async, get_uploaded_file, get_uploaded_file_async, update_file_name, update_project_name, update_file_name_async, update_project_name_async
+from services.file_service import get_uploaded_file_async, update_file_name_async, update_project_name_async, save_uploaded_file_info_async
 # 导入文件映射服务模块
-from services.mapping_service import get_file_mappings, get_file_mappings_async, create_file_mapping, create_file_mapping_async, update_file_mapping, update_file_mapping_async, delete_file_mapping
+from services.mapping_service import get_file_mappings_async
 # 导入分类服务模块
 from services.category_service import (
     get_all_categories_async, get_category_by_id_async, create_category_async, 
@@ -69,7 +90,7 @@ async def get_uploaded_files(current_user_data = Depends(get_current_user)):
         
         # 构建缓存键，包含用户ID和角色
         cache_key = f"uploaded_files:{user_id}:{user_role}"
-        cached_files = cache_service.get(cache_key)
+        cached_files = await cache_service.get(cache_key)
         if cached_files is not None:
             logger.debug(f"从缓存获取用户{user_id}的上传文件列表")
             return cached_files
@@ -107,7 +128,7 @@ async def get_uploaded_files(current_user_data = Depends(get_current_user)):
             result.append(file_dict)
         
         # 缓存上传文件列表（5分钟，因为权限可能变化较频繁）
-        cache_service.set(cache_key, result, expire=300)
+        await cache_service.set(cache_key, result, expire=300)
         logger.debug(f"缓存用户{user_id}的上传文件列表，共{len(result)}个文件")
         
         return result
@@ -133,6 +154,84 @@ async def get_single_uploaded_file(file_unique_id: str):
         error_detail = f"获取文件信息失败: {str(e)}\n详细信息: {traceback.format_exc()}"
         print(error_detail)
         return JSONResponse(status_code=500, content={"error": f"获取文件信息失败: {str(e)}"})
+
+# 删除上传文件API - 管理员权限
+@app.delete("/uploaded_files/{file_unique_id}")
+async def delete_uploaded_file(file_unique_id: str, current_user_data = Depends(get_admin_user)):
+    """
+    删除上传的文件（管理员功能）
+    会删除uploaded_files记录和相关的parts_library数据
+    """
+    try:
+        user_info, token = current_user_data
+        user_id = user_info['id']
+        user_role = user_info['role']
+        logger.info(f"[DELETE] 管理员用户 {user_id} (角色: {user_role}) 请求删除文件 {file_unique_id}")
+        logger.info(f"[DELETE] 请求时间: {datetime.now().isoformat()}")
+        logger.info(f"[DELETE] 文件唯一ID: {file_unique_id}")
+        
+        async with get_async_db_connection() as conn:
+            # 首先检查文件是否存在
+            logger.info(f"[DELETE] 开始查询文件信息，文件ID: {file_unique_id}")
+            file_info = await conn.fetchrow("""
+                SELECT id, original_filename, project_name, category_id
+                FROM uploaded_files 
+                WHERE file_unique_id = $1
+            """, file_unique_id)
+            
+            if not file_info:
+                logger.warning(f"[DELETE] 文件未找到，文件ID: {file_unique_id}")
+                return JSONResponse(status_code=404, content={"error": f"未找到文件ID为 {file_unique_id} 的文件"})
+            
+            original_filename = file_info['original_filename']
+            project_name = file_info['project_name']
+            category_id = file_info['category_id']
+            logger.info(f"[DELETE] 文件信息查询成功: {original_filename} (项目: {project_name}, 分类ID: {category_id})")
+            
+            # 删除相关的parts_library数据
+            logger.info(f"[DELETE] 开始删除parts_library数据，文件ID: {file_unique_id}")
+            deleted_parts = await conn.execute("""
+                DELETE FROM parts_library 
+                WHERE file_unique_id = $1
+            """, file_unique_id)
+            logger.info(f"[DELETE] parts_library数据删除完成")
+            
+            # 删除uploaded_files记录
+            logger.info(f"[DELETE] 开始删除uploaded_files记录，文件ID: {file_unique_id}")
+            deleted_files = await conn.execute("""
+                DELETE FROM uploaded_files 
+                WHERE file_unique_id = $1
+            """, file_unique_id)
+            logger.info(f"[DELETE] uploaded_files记录删除完成")
+            
+            # 清理相关缓存
+            try:
+                # 清理文件列表缓存
+                if cache_service.redis_client:
+                    cache_keys = await cache_service.redis_client.keys("uploaded_files:*")
+                    if cache_keys:
+                        await cache_service.redis_client.delete(*cache_keys)
+                        logger.info(f"清理了 {len(cache_keys)} 个上传文件缓存")
+                else:
+                    # 内存缓存清理
+                    keys_to_delete = [key for key in cache_service._memory_cache.keys() 
+                                    if key.startswith("uploaded_files:")]
+                    for key in keys_to_delete:
+                        del cache_service._memory_cache[key]
+                    logger.info(f"清理了 {len(keys_to_delete)} 个内存上传文件缓存")
+            except Exception as cache_error:
+                logger.warning(f"清理缓存失败: {cache_error}")
+            
+            logger.info(f"文件删除成功: {file_unique_id} - {original_filename} (项目: {project_name})")
+            return {"status": "success", "message": f"文件 {original_filename} 删除成功"}
+            
+    except HTTPException as http_exc:
+        logger.error(f"HTTP异常: {http_exc.status_code} - {http_exc.detail}")
+        raise http_exc
+    except Exception as e:
+        logger.error(f"删除文件失败: {str(e)}")
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
+        return JSONResponse(status_code=500, content={"error": f"删除文件失败: {str(e)}"})
 
 # 更新文件名API
 @app.put("/uploaded_files/{file_unique_id}/rename")
@@ -208,7 +307,6 @@ async def get_file_mappings_by_id(file_unique_id: str):
 
 
 import uuid
-from services.file_service import save_uploaded_file_info, save_uploaded_file_info_async
 
 @app.post("/upload_parts_excel")
 async def upload_parts_excel(
@@ -303,12 +401,12 @@ async def upload_parts_excel(
     # 如果有文件上传成功，清除相关缓存
     if any(result["status"] == "imported" for result in results):
         # 清除所有上传文件列表缓存（包括用户特定的缓存）
-        cache_service.clear_pattern("uploaded_files:*")
+        await cache_service.clear_pattern("uploaded_files:*")
         # 清除项目列表缓存
-        cache_service.delete("projects:all")
-        cache_service.delete("project_names:all")
+        await cache_service.delete("projects:all")
+        await cache_service.delete("project_names:all")
         # 清除用户项目缓存
-        cache_service.clear_pattern("user_projects:*")
+        await cache_service.clear_pattern("user_projects:*")
         logger.info("文件上传成功，已清除相关缓存")
     
     if all(result["status"] == "imported" for result in results):
@@ -324,7 +422,7 @@ async def get_all_projects():
     try:
         # 尝试从缓存获取项目列表
         cache_key = "projects:all"
-        cached_projects = cache_service.get(cache_key)
+        cached_projects = await cache_service.get(cache_key)
         if cached_projects is not None:
             logger.debug("从缓存获取项目列表")
             return cached_projects
@@ -340,7 +438,7 @@ async def get_all_projects():
         result = [{"project_name": row['project_name'], "upload_batch": row['upload_batch'], "file_unique_id": row['file_unique_id']} for row in rows]
         
         # 缓存项目列表（10分钟）
-        cache_service.set(cache_key, result, expire=600)
+        await cache_service.set(cache_key, result, expire=600)
         logger.debug("缓存项目列表")
         
         return result
@@ -361,7 +459,7 @@ async def get_user_projects(current_user_data = Depends(get_current_user)):
         
         # 尝试从缓存获取用户项目列表
         cache_key = f"user_projects:{user_id}"
-        cached_projects = cache_service.get(cache_key)
+        cached_projects = await cache_service.get(cache_key)
         if cached_projects is not None:
             logger.debug(f"从缓存获取用户{user_id}的项目列表")
             return cached_projects
@@ -412,7 +510,7 @@ async def get_user_projects(current_user_data = Depends(get_current_user)):
         result = [{"project_name": row['project_name'], "upload_batch": row['upload_batch'], "file_unique_id": row['file_unique_id']} for row in rows]
         
         # 缓存用户项目列表（5分钟，因为权限可能变化较频繁）
-        cache_service.set(cache_key, result, expire=300)
+        await cache_service.set(cache_key, result, expire=300)
         logger.debug(f"缓存用户{user_id}的项目列表")
         
         logger.info(f"成功返回用户 {user_id} 的项目列表，共 {len(result)} 个项目")
@@ -430,7 +528,7 @@ async def get_project_names():
     try:
         # 尝试从缓存获取项目名称列表
         cache_key = "project_names:all"
-        cached_names = cache_service.get(cache_key)
+        cached_names = await cache_service.get(cache_key)
         if cached_names is not None:
             logger.debug("从缓存获取项目名称列表")
             return cached_names
@@ -446,7 +544,7 @@ async def get_project_names():
         result = [row['project_name'] for row in rows]
         
         # 缓存项目名称列表（10分钟）
-        cache_service.set(cache_key, result, expire=600)
+        await cache_service.set(cache_key, result, expire=600)
         logger.debug("缓存项目名称列表")
         
         return result
@@ -460,7 +558,7 @@ async def get_parts(project_name: str = Query(..., description="项目名称")):
     try:
         # 尝试从缓存获取零部件数据
         cache_key = f"parts:{project_name}"
-        cached_parts = cache_service.get(cache_key)
+        cached_parts = await cache_service.get(cache_key)
         if cached_parts is not None:
             logger.debug(f"从缓存获取项目{project_name}的零部件列表")
             return cached_parts
@@ -484,7 +582,7 @@ async def get_parts(project_name: str = Query(..., description="项目名称")):
             result.append(part_dict)
         
         # 缓存零部件数据（5分钟）
-        cache_service.set(cache_key, result, expire=300)
+        await cache_service.set(cache_key, result, expire=300)
         logger.debug(f"缓存项目{project_name}的零部件列表，共{len(result)}条记录")
         
         return result
@@ -500,6 +598,9 @@ from datetime import datetime
 
 class MergeRequest(BaseModel):
     project_names: List[str]
+
+class MergeByFileIdsRequest(BaseModel):
+    file_ids: List[str]
     
 class SaveMergedProjectRequest(BaseModel):
     merged_project_name: str
@@ -528,143 +629,69 @@ class PartUpdate(BaseModel):
 class UpdatePartsRequest(BaseModel):
     parts: List[PartUpdate]
 
-class MergeByFileIdsRequest(BaseModel):
-    file_unique_ids: List[str]
 
+# 合并多个项目的零部件API（通过项目名称）
 @app.post("/merge_parts")
-async def merge_parts(request: Request):
-    """
-    合并多个项目的零部件数据（带缓存优化）
-    """
+async def merge_parts(req: MergeRequest):
+    """合并多个项目的零部件"""
     try:
-        data = await request.json()
-        project_names = data.get('project_names', [])
-        
-        if not project_names:
-            return JSONResponse(status_code=400, content={"error": "请提供项目名称列表"})
-        
-        # 生成缓存键（基于项目名称列表的排序结果）
-        sorted_projects = sorted(project_names)
-        cache_key = f"merge_parts:{'|'.join(sorted_projects)}"
-        
-        # 尝试从缓存获取合并结果
-        cached_result = cache_service.get(cache_key)
-        if cached_result is not None:
-            logger.debug(f"从缓存获取项目合并结果: {sorted_projects}")
-            return cached_result
-        
-        # 缓存未命中，执行合并逻辑
         async with get_async_db_connection() as conn:
-            # 构建查询条件
-            placeholders = ','.join([f'${i+1}' for i in range(len(project_names))])
-            query = f"""
-                SELECT * FROM parts_library 
-                WHERE project_name IN ({placeholders})
-                ORDER BY project_name, id
-            """
+            # 获取所有项目的零部件
+            all_parts = []
+            for project_name in req.project_names:
+                rows = await conn.fetch("""
+                    SELECT * FROM parts_library 
+                    WHERE project_name = $1 
+                    ORDER BY id
+                """, project_name)
+                
+                for row in rows:
+                    part_dict = dict(row)
+                    # 转换 Decimal 类型为 float
+                    for key, value in part_dict.items():
+                        if hasattr(value, '__float__'):
+                            part_dict[key] = float(value)
+                    all_parts.append(part_dict)
             
-            rows = await conn.fetch(query, *project_names)
-        
-        # 按项目分组并合并
-        projects_data = {}
-        for row in rows:
-            project_name = row['project_name']
-            if project_name not in projects_data:
-                projects_data[project_name] = []
-            
-            part_dict = dict(row)
-            # 转换 Decimal 类型为 float
-            for key, value in part_dict.items():
-                if hasattr(value, '__float__'):
-                    part_dict[key] = float(value)
-            projects_data[project_name].append(part_dict)
-        
-        # 构建扁平化的零部件列表
-        all_parts = []
-        for parts_list in projects_data.values():
-            all_parts.extend(parts_list)
-        
-        # 缓存合并结果（15分钟，因为合并操作相对耗时）
-        cache_service.set(cache_key, all_parts, expire=900)
-        logger.debug(f"缓存项目合并结果: {sorted_projects}，共{len(all_parts)}个零部件")
-        
-        return all_parts
-        
+            return all_parts
     except Exception as e:
-        logger.error(f"合并项目时出错: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": f"合并项目时出错: {str(e)}"})
+        logger.error(f"合并零部件时出错: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": f"合并零部件时出错: {str(e)}"})
 
+
+# 合并多个项目的零部件API（通过文件唯一ID）
 @app.post("/merge_parts_by_file_ids")
-async def merge_parts_by_file_ids(request: Request):
-    """
-    根据文件ID合并零部件数据（带缓存优化）
-    """
+async def merge_parts_by_file_ids(req: MergeByFileIdsRequest):
+    """合并多个文件项目的零部件"""
     try:
-        data = await request.json()
-        file_ids = data.get('file_ids', [])
-        
-        if not file_ids:
-            return JSONResponse(status_code=400, content={"error": "请提供文件ID列表"})
-        
-        # 生成缓存键（基于文件ID列表的排序结果）
-        sorted_file_ids = sorted(file_ids)
-        cache_key = f"merge_parts_by_files:{'|'.join(sorted_file_ids)}"
-        
-        # 尝试从缓存获取合并结果
-        cached_result = cache_service.get(cache_key)
-        if cached_result is not None:
-            logger.debug(f"从缓存获取文件合并结果: {sorted_file_ids}")
-            return cached_result
-        
-        # 缓存未命中，执行合并逻辑
         async with get_async_db_connection() as conn:
-            # 构建查询条件
-            placeholders = ','.join([f'${i+1}' for i in range(len(file_ids))])
-            query = f"""
-                SELECT * FROM parts_library 
-                WHERE file_unique_id IN ({placeholders})
-                ORDER BY file_unique_id, id
-            """
+            # 获取所有文件的零部件
+            all_parts = []
+            for file_unique_id in req.file_ids:
+                rows = await conn.fetch("""
+                    SELECT * FROM parts_library 
+                    WHERE file_unique_id = $1 
+                    ORDER BY id
+                """, file_unique_id)
+                
+                for row in rows:
+                    part_dict = dict(row)
+                    # 转换 Decimal 类型为 float
+                    for key, value in part_dict.items():
+                        if hasattr(value, '__float__'):
+                            part_dict[key] = float(value)
+                    all_parts.append(part_dict)
             
-            rows = await conn.fetch(query, *file_ids)
-        
-        # 按文件ID分组并合并
-        files_data = {}
-        for row in rows:
-            file_id = row['file_unique_id']
-            if file_id not in files_data:
-                files_data[file_id] = []
-            
-            part_dict = dict(row)
-            # 转换 Decimal 类型为 float
-            for key, value in part_dict.items():
-                if hasattr(value, '__float__'):
-                    part_dict[key] = float(value)
-            files_data[file_id].append(part_dict)
-        
-        # 构建扁平化的零部件列表
-        all_parts = []
-        for parts_list in files_data.values():
-            all_parts.extend(parts_list)
-        
-        # 缓存合并结果（15分钟）
-        cache_service.set(cache_key, all_parts, expire=900)
-        logger.debug(f"缓存文件合并结果: {sorted_file_ids}，共{len(all_parts)}个零部件")
-        
-        return all_parts
-        
+            return all_parts
     except Exception as e:
-        logger.error(f"按文件ID合并时出错: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": f"按文件ID合并时出错: {str(e)}"})
+        logger.error(f"合并文件零部件时出错: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": f"合并文件零部件时出错: {str(e)}"})
 
-
-
+# 更新零部件API（异步实现）
 @app.post("/update_parts")
-def update_parts(req: UpdatePartsRequest):
+async def update_parts(req: UpdatePartsRequest):
     try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            
+        async with get_async_db_connection() as conn:
             updated_count = 0
             
             for part in req.parts:
@@ -675,7 +702,7 @@ def update_parts(req: UpdatePartsRequest):
                 # 动态构建更新字段和值
                 for field, value in part.dict(exclude={'id'}).items():
                     if value is not None:  # 只更新非空字段
-                        update_fields.append(f"{field} = %s")
+                        update_fields.append(f"{field} = ${len(update_values) + 1}")
                         update_values.append(value)
                 
                 if not update_fields:  # 如果没有要更新的字段，跳过
@@ -688,56 +715,47 @@ def update_parts(req: UpdatePartsRequest):
                 sql = f"""
                     UPDATE parts_library 
                     SET {', '.join(update_fields)}
-                    WHERE id = %s
+                    WHERE id = ${len(update_values)}
                 """
-                cur.execute(sql, update_values)
-                updated_count += cur.rowcount
+                rowcount = await conn.execute(sql, *update_values)
+                updated_count += int(rowcount.split()[-1])  # 提取影响的行数
             
-            conn.commit()
-            cur.close()
-        
-        return {"status": "success", "updated_count": updated_count}
+            return {"status": "success", "updated_count": updated_count}
     except Exception as e:
         return JSONResponse(status_code=500, content={"status": "error", "message": f"更新零部件失败: {str(e)}"})
 
 
-# 保存合并项目API
+# 保存合并项目API（异步实现）
 @app.post("/save_merged_project")
-def save_merged_project(req: SaveMergedProjectRequest, current_user_data = Depends(get_current_user)):
+async def save_merged_project(req: SaveMergedProjectRequest, current_user_data = Depends(get_current_user)):
     """保存合并项目（带连接管理优化和用户权限）"""
     try:
+        # 添加调试日志
+        logger.info(f"收到保存合并项目请求: merged_project_name={req.merged_project_name}, source_projects={req.source_projects}, parts_count={len(req.parts)}")
+        
         user_info, token = current_user_data
         user_id = user_info['id']
         
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            try:
-                # 插入合并项目记录，包含创建者信息
-                if req.source_file_ids:
-                    cur.execute("""
-                        INSERT INTO merged_projects (merged_project_name, source_projects, source_file_ids, created_by, created_at, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        RETURNING id
-                    """, (req.merged_project_name, req.source_projects, req.source_file_ids, user_id, datetime.now(), datetime.now()))
-                else:
-                    cur.execute("""
-                        INSERT INTO merged_projects (merged_project_name, source_projects, created_by, created_at, updated_at)
-                        VALUES (%s, %s, %s, %s, %s)
-                        RETURNING id
-                    """, (req.merged_project_name, req.source_projects, user_id, datetime.now(), datetime.now()))
-                
-                merged_project_id = cur.fetchone()[0]
-                
-                # 插入合并零部件记录
+        async with get_async_db_connection() as conn:
+            # 插入合并项目记录，包含创建者信息
+            if req.source_file_ids:
+                merged_project_id = await conn.fetchval("""
+                    INSERT INTO merged_projects (merged_project_name, source_projects, source_file_ids, created_by, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $5)
+                    RETURNING id
+                """, req.merged_project_name, req.source_projects, req.source_file_ids, user_id, datetime.now())
+            else:
+                merged_project_id = await conn.fetchval("""
+                    INSERT INTO merged_projects (merged_project_name, source_projects, created_by, created_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $4)
+                    RETURNING id
+                """, req.merged_project_name, req.source_projects, user_id, datetime.now())
+            
+            # 批量插入合并零部件记录
+            if req.parts:
+                values_list = []
                 for part in req.parts:
-                    cur.execute("""
-                        INSERT INTO merged_parts (
-                            merged_project_id, level, part_code, part_name, spec, version, material,
-                            unit_count_per_level, unit_weight_kg, total_weight_kg, part_property,
-                            drawing_size, reference_number, purchase_status, process_route, remark,
-                            created_at, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
+                    values_list.append((
                         merged_project_id, part.get('level'), part.get('part_code'), part.get('part_name'),
                         part.get('spec'), part.get('version'), part.get('material'),
                         part.get('unit_count_per_level'), part.get('unit_weight_kg'), part.get('total_weight_kg'),
@@ -746,69 +764,72 @@ def save_merged_project(req: SaveMergedProjectRequest, current_user_data = Depen
                         datetime.now(), datetime.now()
                     ))
                 
-                conn.commit()
-                return {"status": "success", "merged_project_id": merged_project_id, "message": "合并项目保存成功"}
-            finally:
-                cur.close()
+                await conn.executemany("""
+                    INSERT INTO merged_parts (
+                        merged_project_id, level, part_code, part_name, spec, version, material,
+                        unit_count_per_level, unit_weight_kg, total_weight_kg, part_property,
+                        drawing_size, reference_number, purchase_status, process_route, remark,
+                        created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                """, values_list)
+            
+            return {"status": "success", "merged_project_id": merged_project_id, "message": "合并项目保存成功"}
         
     except Exception as e:
+        logger.error(f"保存合并项目失败: {str(e)}")
+        logger.error(f"请求数据: merged_project_name={req.merged_project_name}, source_projects={req.source_projects}")
         return JSONResponse(status_code=500, content={"status": "error", "message": f"保存合并项目失败: {str(e)}"})
 
 # 保存合并项目API - 带连字符的路由（新增）
 @app.post("/save-merged-project")
-def save_merged_project_with_hyphen(req: SaveMergedProjectRequest, current_user_data = Depends(get_current_user)):
-    return save_merged_project(req, current_user_data)
+async def save_merged_project_with_hyphen(req: SaveMergedProjectRequest, current_user_data = Depends(get_current_user)):
+    return await save_merged_project(req, current_user_data)
 
 # 获取所有合并项目API - 带连字符的路由（新增）
 @app.get("/merged-projects")
-def get_merged_projects_with_hyphen(current_user_data = Depends(get_current_user)):
-    return get_merged_projects(current_user_data)
+async def get_merged_projects_with_hyphen(current_user_data = Depends(get_current_user)):
+    return await get_merged_projects(current_user_data)
 
 # 获取合并项目API
+# 获取合并项目列表API（异步实现）
 @app.get("/merged_projects")
-def get_merged_projects(current_user_data = Depends(get_current_user)):
+async def get_merged_projects(current_user_data = Depends(get_current_user)):
     """获取合并项目列表（带用户权限过滤）"""
     try:
         user_info, token = current_user_data
         user_id = user_info['id']
         user_role = user_info['role']
         
-        conn = get_connection()
-        cur = conn.cursor()
-        
-        # 管理员可以看到所有项目，普通用户只能看到自己创建的项目
-        if user_role == 'admin':
-            cur.execute("""
-                SELECT mp.id, mp.merged_project_name, mp.source_projects, mp.created_at, mp.created_by,
-                       u.username as creator_name, u.full_name as creator_full_name
-                FROM merged_projects mp
-                LEFT JOIN users u ON mp.created_by = u.id
-                ORDER BY mp.created_at DESC
-            """)
-        else:
-            cur.execute("""
-                SELECT mp.id, mp.merged_project_name, mp.source_projects, mp.created_at, mp.created_by,
-                       u.username as creator_name, u.full_name as creator_full_name
-                FROM merged_projects mp
-                LEFT JOIN users u ON mp.created_by = u.id
-                WHERE mp.created_by = %s
-                ORDER BY mp.created_at DESC
-            """, (user_id,))
-        
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        async with get_async_db_connection() as conn:
+            # 管理员可以看到所有项目，普通用户只能看到自己创建的项目
+            if user_role == 'admin':
+                rows = await conn.fetch("""
+                    SELECT mp.id, mp.merged_project_name, mp.source_projects, mp.created_at, mp.created_by,
+                           u.username as creator_name, u.full_name as creator_full_name
+                    FROM merged_projects mp
+                    LEFT JOIN users u ON mp.created_by = u.id
+                    ORDER BY mp.created_at DESC
+                """)
+            else:
+                rows = await conn.fetch("""
+                    SELECT mp.id, mp.merged_project_name, mp.source_projects, mp.created_at, mp.created_by,
+                           u.username as creator_name, u.full_name as creator_full_name
+                    FROM merged_projects mp
+                    LEFT JOIN users u ON mp.created_by = u.id
+                    WHERE mp.created_by = $1
+                    ORDER BY mp.created_at DESC
+                """, user_id)
         
         result = []
         for row in rows:
             result.append({
-                "id": row[0],
-                "merged_project_name": row[1],
-                "source_projects": row[2],
-                "created_at": row[3].isoformat() if row[3] else None,
-                "created_by": row[4],
-                "creator_name": row[5],
-                "creator_full_name": row[6]
+                "id": row['id'],
+                "merged_project_name": row['merged_project_name'],
+                "source_projects": row['source_projects'],
+                "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+                "created_by": row['created_by'],
+                "creator_name": row['creator_name'],
+                "creator_full_name": row['creator_full_name']
             })
         
         return result
@@ -817,349 +838,391 @@ def get_merged_projects(current_user_data = Depends(get_current_user)):
 
 # 获取合并项目的零部件API - 带连字符的路由（新增）
 @app.get("/merged-project-parts/{merged_project_id}")
-def get_merged_project_parts_with_hyphen(merged_project_id: int):
-    return get_merged_project_parts(merged_project_id)
+async def get_merged_project_parts_with_hyphen(merged_project_id: int, current_user_data = Depends(get_current_user)):
+    return await get_merged_project_parts(merged_project_id, current_user_data)
 
 # 获取合并项目的零部件API（带连接管理优化）
 @app.get("/merged_project_parts/{merged_project_id}")
-def get_merged_project_parts(merged_project_id: int):
+async def get_merged_project_parts(merged_project_id: int, current_user_data = Depends(get_current_user)):
+    """获取指定合并项目的所有部件"""
     try:
-        conn = get_connection()
-        cur = None
-        try:
-            cur = conn.cursor()
-            
-            # 首先获取合并项目信息
-            cur.execute("""
-                SELECT id, merged_project_name, source_projects, created_at
-                FROM merged_projects
-                WHERE id = %s
-            """, (merged_project_id,))
-            
-            project_row = cur.fetchone()
-            if not project_row:
-                return JSONResponse(status_code=404, content={"error": "合并项目不存在"})
-                
-            project = {
-                "id": project_row[0],
-                "merged_project_name": project_row[1],
-                "source_projects": project_row[2],
-                "created_at": project_row[3].isoformat() if project_row[3] else None
-            }
-            
-            # 然后获取合并项目的零部件
-            cur.execute("""
-                SELECT * FROM merged_parts
-                WHERE merged_project_id = %s
-                ORDER BY id
-            """, (merged_project_id,))
-            
-            rows = cur.fetchall()
-            columns = [desc[0] for desc in cur.description]
-        finally:
-            if cur:
-                cur.close()
-        conn.close()
+        user_info, token = current_user_data
+        user_id = user_info['id']
+        user_role = user_info['role']
         
-        # 转换为字典列表
-        parts = []
-        for row in rows:
-            part_dict = dict(zip(columns, row))
-            # 确保level字段是整数类型
-            if 'level' in part_dict and part_dict['level'] is not None:
-                try:
-                    part_dict['level'] = int(part_dict['level'])
-                except (ValueError, TypeError):
-                    part_dict['level'] = 0
+        async with get_async_db_connection() as conn:
+            # 首先检查项目是否存在，以及用户是否有权限访问
+            if user_role == 'admin':
+                project_check = await conn.fetchrow("""
+                    SELECT mp.id, mp.merged_project_name, mp.created_by
+                    FROM merged_projects mp
+                    WHERE mp.id = $1
+                """, merged_project_id)
             else:
-                part_dict['level'] = 0
-                
-            # 格式化日期时间字段
-            for date_field in ['created_at', 'updated_at']:
-                if date_field in part_dict and part_dict[date_field]:
-                    part_dict[date_field] = part_dict[date_field].isoformat()
-                    
-            parts.append(part_dict)
+                project_check = await conn.fetchrow("""
+                    SELECT mp.id, mp.merged_project_name, mp.created_by
+                    FROM merged_projects mp
+                    WHERE mp.id = $1 AND mp.created_by = $2
+                """, merged_project_id, user_id)
+            
+            if not project_check:
+                return JSONResponse(status_code=404, content={"error": "合并项目未找到或无权限访问"})
+            
+            # 获取项目部件
+            rows = await conn.fetch("""
+                SELECT mp.id, mp.part_number, mp.part_name, mp.specification, mp.quantity, 
+                       mp.unit, mp.manufacturer, mp.material, mp.remarks, mp.file_id, mp.project_name
+                FROM merged_parts mp
+                WHERE mp.merged_project_id = $1
+                ORDER BY mp.part_number
+            """, merged_project_id)
         
-        #parts.append(part_dict)
+        result = []
+        for row in rows:
+            result.append({
+                "id": row['id'],
+                "part_number": row['part_number'],
+                "part_name": row['part_name'],
+                "specification": row['specification'],
+                "quantity": row['quantity'],
+                "unit": row['unit'],
+                "manufacturer": row['manufacturer'],
+                "material": row['material'],
+                "remarks": row['remarks'],
+                "file_id": row['file_id'],
+                "project_name": row['project_name']
+            })
         
-        return {"parts": parts, "project": project}
+        return result
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"获取合并项目零部件时出错: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"获取合并项目部件时出错: {str(e)}"})
 
 # 删除合并项目API - 带连字符的路由（新增）
 @app.delete("/merged-projects/{merged_project_id}")
-def delete_merged_project_with_hyphen(merged_project_id: int):
-    return delete_merged_project(merged_project_id)
+async def delete_merged_project_with_hyphen(merged_project_id: int, current_user_data = Depends(get_current_user)):
+    return await delete_merged_project(merged_project_id, current_user_data)
 
 # 删除合并项目中的零部件API - 带连字符的路由（新增）
 @app.delete("/merged-parts/{part_id}")
-def delete_merged_part_with_hyphen(part_id: int):
-    return delete_merged_part(part_id)
+async def delete_merged_part_with_hyphen(part_id: int, current_user_data = Depends(get_current_user)):
+    return await delete_merged_part(part_id, current_user_data)
 
-# 删除合并项目API
+# 删除合并项目API（异步实现）
 @app.delete("/merged_projects/{merged_project_id}")
-def delete_merged_project(merged_project_id: int):
+async def delete_merged_project(merged_project_id: int, current_user_data = Depends(get_current_user)):
+    """删除合并项目及其所有部件"""
     try:
-        conn = get_connection()
-        cur = conn.cursor()
+        user_info, token = current_user_data
+        user_id = user_info['id']
+        user_role = user_info['role']
         
-        # 首先删除合并项目的所有零部件
-        cur.execute("""
-            DELETE FROM merged_parts
-            WHERE merged_project_id = %s
-        """, (merged_project_id,))
+        logger.info(f"收到删除合并项目请求: merged_project_id={merged_project_id}, user_id={user_id}, user_role={user_role}")
         
-        # 然后删除合并项目
-        cur.execute("""
-            DELETE FROM merged_projects
-            WHERE id = %s
-        """, (merged_project_id,))
+        async with get_async_db_connection() as conn:
+            # 首先检查项目是否存在，以及用户是否有权限删除
+            if user_role == 'admin':
+                project_check = await conn.fetchrow("""
+                    SELECT mp.id, mp.created_by
+                    FROM merged_projects mp
+                    WHERE mp.id = $1
+                """, merged_project_id)
+                logger.info(f"管理员删除检查: merged_project_id={merged_project_id}, project_check={project_check}")
+            else:
+                project_check = await conn.fetchrow("""
+                    SELECT mp.id, mp.created_by
+                    FROM merged_projects mp
+                    WHERE mp.id = $1 AND mp.created_by = $2
+                """, merged_project_id, user_id)
+                logger.info(f"普通用户删除检查: merged_project_id={merged_project_id}, user_id={user_id}, project_check={project_check}")
+            
+            if not project_check:
+                logger.warning(f"合并项目未找到或无权限删除: merged_project_id={merged_project_id}, user_id={user_id}")
+                return JSONResponse(status_code=404, content={"error": "合并项目未找到或无权限删除"})
+            
+            # 开始事务
+            async with conn.transaction():
+                logger.info(f"开始删除合并项目的所有部件: merged_project_id={merged_project_id}")
+                # 先删除合并项目的所有部件
+                parts_result = await conn.execute("""
+                    DELETE FROM merged_parts
+                    WHERE merged_project_id = $1
+                """, merged_project_id)
+                logger.info(f"删除部件结果: {parts_result}")
+                
+                logger.info(f"开始删除合并项目: merged_project_id={merged_project_id}")
+                # 然后删除合并项目
+                result = await conn.execute("""
+                    DELETE FROM merged_projects
+                    WHERE id = $1
+                """, merged_project_id)
+                
+                logger.info(f"删除项目结果: {result}")
+                if result == "DELETE 0":
+                    return JSONResponse(status_code=404, content={"error": "合并项目删除失败"})
         
-        conn.commit()
-        cur.close()
-        conn.close()
+        # 清除相关缓存
+        logger.info(f"清除相关缓存: merged_project_id={merged_project_id}")
+        await cache_service.clear_pattern("merged_projects:*")
+        await cache_service.clear_pattern(f"merged_project_parts:{merged_project_id}:*")
         
-        return {"status": "success", "message": "合并项目删除成功"}
+        logger.info(f"合并项目删除成功: merged_project_id={merged_project_id}")
+        return {"status": "success", "message": "合并项目及其部件删除成功"}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": f"删除合并项目失败: {str(e)}"})
+        logger.error(f"删除合并项目时出错: merged_project_id={merged_project_id}, error={str(e)}")
+        logger.error(f"错误详情: {type(e).__name__}: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": f"删除合并项目时出错: {str(e)}"})
 
 # 删除合并项目中的零部件API
+# 删除合并项目中的部件API（异步实现）
 @app.delete("/merged_parts/{part_id}")
-def delete_merged_part(part_id: int):
+async def delete_merged_part(part_id: int, current_user_data = Depends(get_current_user)):
+    """删除合并项目中的指定部件"""
     try:
-        conn = get_connection()
-        cur = conn.cursor()
+        user_info, token = current_user_data
+        user_id = user_info['id']
+        user_role = user_info['role']
         
-        # 删除指定的零部件
-        cur.execute("""
-            DELETE FROM merged_parts
-            WHERE id = %s
-        """, (part_id,))
+        async with get_async_db_connection() as conn:
+            # 首先检查部件是否存在，以及用户是否有权限删除
+            if user_role == 'admin':
+                part_check = await conn.fetchrow("""
+                    SELECT mp.id, mp.merged_project_id, mp.part_number, mp.project_name
+                    FROM merged_parts mp
+                    JOIN merged_projects mpr ON mp.merged_project_id = mpr.id
+                    WHERE mp.id = $1
+                """, part_id)
+            else:
+                part_check = await conn.fetchrow("""
+                    SELECT mp.id, mp.merged_project_id, mp.part_number, mp.project_name
+                    FROM merged_parts mp
+                    JOIN merged_projects mpr ON mp.merged_project_id = mpr.id
+                    WHERE mp.id = $1 AND mpr.created_by = $2
+                """, part_id, user_id)
+            
+            if not part_check:
+                return JSONResponse(status_code=404, content={"error": "部件未找到或无权限删除"})
+            
+            # 删除部件
+            result = await conn.execute("""
+                DELETE FROM merged_parts
+                WHERE id = $1
+            """, part_id)
+            
+            if result == "DELETE 0":
+                return JSONResponse(status_code=404, content={"error": "部件删除失败"})
         
-        conn.commit()
-        cur.close()
-        conn.close()
+        # 清除相关缓存
+        await cache_service.clear_pattern("merged_project_parts:*")
         
-        return {"status": "success", "message": "零部件删除成功"}
+        return {"status": "success", "message": f"部件 {part_check['part_number']} 删除成功"}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": f"删除零部件失败: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"删除部件时出错: {str(e)}"})
 
 # 导出合并项目为Excel API - 带连字符的路由（新增）
 @app.get("/export-merged-project/{merged_project_id}")
 def export_merged_project_with_hyphen(merged_project_id: int):
     return export_merged_project(merged_project_id)
 
+# 导出合并项目为Excel API（异步实现）
 @app.get("/export_merged_project/{merged_project_id}")
-def export_merged_project(merged_project_id: int):
+async def export_merged_project(merged_project_id: int, current_user_data = Depends(get_current_user)):
+    """导出合并项目为Excel文件"""
     try:
-        import pandas as pd
-        from io import BytesIO
-        from fastapi.responses import StreamingResponse
-        import traceback
-        print(f"开始导出合并项目 ID: {merged_project_id}")
-        print(f"导入pandas版本: {pd.__version__}")
-        print(f"导入BytesIO和StreamingResponse成功")
+        user_info, token = current_user_data
+        user_id = user_info['id']
+        user_role = user_info['role']
         
-        conn = get_connection()
-        cur = conn.cursor()
-        
-        # 获取合并项目信息
-        cur.execute("""
-            SELECT merged_project_name FROM merged_projects
-            WHERE id = %s
-        """, (merged_project_id,))
-        
-        project_row = cur.fetchone()
-        if not project_row:
-            return JSONResponse(status_code=404, content={"error": "合并项目不存在"})
+        async with get_async_db_connection() as conn:
+            # 首先检查项目是否存在，以及用户是否有权限访问
+            if user_role == 'admin':
+                project_check = await conn.fetchrow("""
+                    SELECT mp.id, mp.merged_project_name, mp.source_projects, mp.created_at
+                    FROM merged_projects mp
+                    WHERE mp.id = $1
+                """, merged_project_id)
+            else:
+                project_check = await conn.fetchrow("""
+                    SELECT mp.id, mp.merged_project_name, mp.source_projects, mp.created_at
+                    FROM merged_projects mp
+                    WHERE mp.id = $1 AND mp.created_by = $2
+                """, merged_project_id, user_id)
             
-        project_name = project_row[0]
-        
-        # 获取合并项目的零部件
-        cur.execute("""
-            SELECT 
-                level, part_code, part_name, spec, version, material,
-                unit_count_per_level, unit_weight_kg, total_weight_kg, part_property,
-                drawing_size, reference_number, purchase_status, process_route, remark
-            FROM merged_parts
-            WHERE merged_project_id = %s
-            ORDER BY id
-        """, (merged_project_id,))
-        
-        rows = cur.fetchall()
-        columns = ['层级', '零件号', '零件名称', '规格', '版本号', '材料',
-                  '单层级用量', '单件重量(kg)', '总成重量(kg)', '零件属性',
-                  '图幅', '参图号', '采购状态', '工艺路线', '备注']
-        
-        cur.close()
-        conn.close()
-        
-        # 创建DataFrame
-        df = pd.DataFrame(rows, columns=columns)
+            if not project_check:
+                return JSONResponse(status_code=404, content={"error": "合并项目未找到或无权限访问"})
+            
+            # 获取项目部件
+            rows = await conn.fetch("""
+                SELECT mp.part_number, mp.part_name, mp.specification, mp.quantity, 
+                       mp.unit, mp.manufacturer, mp.material, mp.remarks, mp.project_name
+                FROM merged_parts mp
+                WHERE mp.merged_project_id = $1
+                ORDER BY mp.part_number
+            """, merged_project_id)
         
         # 创建Excel文件
-        output = BytesIO()
+        df = pd.DataFrame([{
+            "物料编码": row['part_number'],
+            "物料名称": row['part_name'],
+            "规格": row['specification'],
+            "数量": row['quantity'],
+            "单位": row['unit'],
+            "制造商": row['manufacturer'],
+            "材质": row['material'],
+            "备注": row['remarks'],
+            "所属项目": row['project_name']
+        } for row in rows])
+        
+        # 创建内存中的Excel文件
+        output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='合并零部件')
+            df.to_excel(writer, sheet_name='物料清单', index=False)
+            
+            # 获取工作表并设置列宽
+            worksheet = writer.sheets['物料清单']
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
         
         output.seek(0)
         
-        # 返回Excel文件
-        # 使用英文文件名避免编码问题
-        ascii_filename = f"merged_project_{merged_project_id}.xlsx"
-        
-        # 创建响应
-        response = StreamingResponse(
-            output,
+        # 返回文件
+        filename = f"{project_check['merged_project_name']}_物料清单.xlsx"
+        return StreamingResponse(
+            io.BytesIO(output.getvalue()),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={ascii_filename}"}
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"}
         )
-        
-        return response
     except Exception as e:
-        error_traceback = traceback.format_exc()
-        print(f"导出合并项目时出错: {str(e)}")
-        print(f"错误堆栈: {error_traceback}")
         return JSONResponse(status_code=500, content={"error": f"导出合并项目时出错: {str(e)}"})
 
 # 删除普通项目API（带连接管理优化）
 @app.delete("/projects/{project_name}")
-def delete_project(project_name: str):
+async def delete_project(project_name: str, current_user_data = Depends(get_current_user)):
+    """删除项目及其所有相关数据"""
     try:
-        conn = get_connection()
-        cur = None
-        try:
-            cur = conn.cursor()
+        user_info, token = current_user_data
+        user_id = user_info['id']
+        user_role = user_info['role']
+        
+        async with get_async_db_connection() as conn:
+            # 首先检查项目是否存在，以及用户是否有权限删除
+            if user_role == 'admin':
+                project_check = await conn.fetchrow("""
+                    SELECT DISTINCT project_name, file_id
+                    FROM parts_library
+                    WHERE project_name = $1
+                    LIMIT 1
+                """, project_name)
+            else:
+                project_check = await conn.fetchrow("""
+                    SELECT DISTINCT pl.project_name, pl.file_id
+                    FROM parts_library pl
+                    JOIN uploaded_files uf ON pl.file_unique_id = uf.file_unique_id
+                    WHERE pl.project_name = $1 AND uf.uploaded_by = $2
+                    LIMIT 1
+                """, project_name, user_id)
             
-            # 删除指定项目的所有零部件
-            cur.execute("""
-                DELETE FROM parts_library
-                WHERE project_name = %s
-            """, (project_name,))
+            if not project_check:
+                return JSONResponse(status_code=404, content={"error": "项目未找到或无权限删除"})
             
-            # 删除项目备注
-            cur.execute("""
-                DELETE FROM project_notes
-                WHERE project_name = %s
-            """, (project_name,))
-            
-            conn.commit()
-            
-            # 清理相关缓存
-            try:
-                # 清理项目列表相关缓存
-                cache_service.delete("projects:all")
-                cache_service.delete("project_names:all")
-                logger.info("已清理项目列表缓存")
+            # 开始事务
+            async with conn.transaction():
+                # 删除项目部件
+                await conn.execute("""
+                    DELETE FROM parts_library
+                    WHERE project_name = $1
+                """, project_name)
                 
-                # 清理零部件相关缓存
-                cache_service.delete(f"parts:{project_name}")
-                cache_service.delete("parts:all")
-                logger.info(f"已清理项目 {project_name} 的零部件缓存")
+                # 删除项目相关笔记
+                await conn.execute("""
+                    DELETE FROM project_notes
+                    WHERE project_name = $1
+                """, project_name)
                 
-                # 清理用户权限相关缓存
-                cache_keys_to_delete = [
-                    "user_projects:*",
-                    "user_categories:*",
-                    "user_permissions:*"
-                ]
-                for pattern in cache_keys_to_delete:
-                    deleted_count = cache_service.clear_pattern(pattern)
-                    logger.info(f"已清理模式 {pattern} 的缓存，删除了 {deleted_count} 个键")
-                logger.info("已清理用户权限相关缓存")
-                
-            except Exception as cache_error:
-                logger.warning(f"清理缓存时出错: {str(cache_error)}")
-                # 缓存清理失败不影响删除操作的成功
-            
-            return {"status": "success", "message": "项目删除成功"}
-        finally:
-            if cur:
-                cur.close()
-        conn.close()
+                # 删除上传文件记录
+                await conn.execute("""
+                    DELETE FROM uploaded_files
+                    WHERE project_name = $1
+                """, project_name)
+        
+        # 清除相关缓存
+        await cache_service.clear_pattern("projects:*")
+        await cache_service.clear_pattern("parts:*")
+        await cache_service.clear_pattern("file_mappings:*")
+        await cache_service.clear_pattern("uploaded_files:*")
+        
+        return {"status": "success", "message": f"项目 '{project_name}' 及其所有相关数据删除成功"}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": f"删除项目失败: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"删除项目时出错: {str(e)}"})
 
-# 基于文件ID删除项目API
+# 基于文件ID删除项目API（异步实现）
 @app.delete("/uploaded_files/{file_unique_id}")
-def delete_project_by_file_id(file_unique_id: str):
+async def delete_project_by_file_id(file_unique_id: str, current_user_data = Depends(get_current_user)):
+    """基于文件ID删除项目及其所有相关数据"""
     try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            
+        user_info, token = current_user_data
+        user_id = user_info['id']
+        user_role = user_info['role']
+        
+        # 管理员可以直接删除任何文件
+        if user_role != 'admin':
+            return JSONResponse(status_code=403, content={"error": "无权限删除此文件"})
+        
+        async with get_async_db_connection() as conn:
             # 首先获取项目名称和分类ID用于删除备注和清理缓存
-            cur.execute("""
-                SELECT project_name, category_id FROM uploaded_files
-                WHERE file_unique_id = %s
-            """, (file_unique_id,))
+            file_info = await conn.fetchrow("""
+                SELECT project_name, category_id
+                FROM uploaded_files
+                WHERE file_unique_id = $1
+            """, file_unique_id)
             
-            result = cur.fetchone()
-            if not result:
-                return JSONResponse(status_code=404, content={"status": "error", "message": "文件不存在"})
+            if not file_info:
+                return JSONResponse(status_code=404, content={"error": "文件不存在"})
             
-            project_name = result[0]
-            category_id = result[1]
+            project_name = file_info['project_name']
+            category_id = file_info['category_id']
             
-            # 删除parts_library表中对应文件ID的所有记录
-            cur.execute("""
-                DELETE FROM parts_library
-                WHERE file_unique_id = %s
-            """, (file_unique_id,))
-            
-            # 删除uploaded_files表中的记录
-            cur.execute("""
-                DELETE FROM uploaded_files
-                WHERE file_unique_id = %s
-            """, (file_unique_id,))
-            
-            # 删除project_notes表中的记录
-            cur.execute("""
-                DELETE FROM project_notes
-                WHERE project_name = %s
-            """, (project_name,))
-            
-            conn.commit()
-            
+            # 开始事务
+            async with conn.transaction():
+                # 删除parts_library表中对应文件ID的所有记录
+                await conn.execute("""
+                    DELETE FROM parts_library
+                    WHERE file_unique_id = $1
+                """, file_unique_id)
+                
+                # 删除uploaded_files表中的记录
+                await conn.execute("""
+                    DELETE FROM uploaded_files
+                    WHERE file_unique_id = $1
+                """, file_unique_id)
+                
+                # 删除project_notes表中的记录
+                await conn.execute("""
+                    DELETE FROM project_notes
+                    WHERE project_name = $1
+                """, project_name)
+        
         # 清理相关缓存
-        try:
-            # 清理所有上传文件列表缓存（包括用户特定的缓存）
-            cache_service.clear_pattern("uploaded_files:*")
-            logger.info("已清理上传文件列表缓存")
-            
-            # 清理项目列表相关缓存
-            cache_service.delete("projects:all")
-            cache_service.delete("project_names:all")
-            logger.info("已清理项目列表缓存")
-            
-            # 清理零部件相关缓存
-            cache_service.delete(f"parts:{project_name}")
-            cache_service.delete("parts:all")
-            logger.info(f"已清理项目 {project_name} 的零部件缓存")
-            
-            # 如果项目有分类，清理分类相关缓存
-            if category_id:
-                cache_service.delete(f"projects_by_category:{category_id}")
-                logger.info(f"已清理分类 {category_id} 的项目缓存")
-            
-            # 清理用户权限相关缓存（使用通配符模式）
-            cache_keys_to_delete = [
-                "user_projects:*",
-                "user_categories:*",
-                "user_permissions:*"
-            ]
-            for pattern in cache_keys_to_delete:
-                deleted_count = cache_service.clear_pattern(pattern)
-                logger.info(f"已清理模式 {pattern} 的缓存，删除了 {deleted_count} 个键")
-            logger.info("已清理用户权限相关缓存")
-            
-        except Exception as cache_error:
-            logger.warning(f"清理缓存时出错: {str(cache_error)}")
-            # 缓存清理失败不影响删除操作的成功
-            
+        await cache_service.clear_pattern("uploaded_files:*")
+        await cache_service.clear_pattern("projects:*")
+        await cache_service.clear_pattern("parts:*")
+        await cache_service.clear_pattern("file_mappings:*")
+        
+        # 如果有分类，清理分类相关缓存
+        if category_id:
+            await cache_service.clear_pattern(f"projects_by_category:{category_id}")
+        
         return {"status": "success", "message": "项目删除成功"}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"status": "error", "message": f"删除项目失败: {str(e)}"})
+        return JSONResponse(status_code=500, content={"error": f"删除项目时出错: {str(e)}"})
 
 # ==================== 分类管理API ====================
 
@@ -1187,7 +1250,7 @@ async def get_user_categories(current_user_data = Depends(get_current_user)):
         cache_key = f"user_categories:{user_id}:{user_role}"
         
         # 尝试从缓存获取分类列表
-        cached_categories = cache_service.get(cache_key)
+        cached_categories = await cache_service.get(cache_key)
         if cached_categories is not None:
             logger.debug(f"从缓存获取用户{user_id}的分类列表")
             return cached_categories
@@ -1220,7 +1283,7 @@ async def get_user_categories(current_user_data = Depends(get_current_user)):
                     })
         
         # 缓存分类列表（5分钟，因为权限可能变化较频繁）
-        cache_service.set(cache_key, categories, expire=300)
+        await cache_service.set(cache_key, categories, expire=300)
         logger.debug(f"缓存用户{user_id}的分类列表，共{len(categories)}个分类")
         
         return categories
@@ -1266,15 +1329,15 @@ async def create_category(request: Request):
             # 清理所有用户的分类缓存
             if cache_service.redis_client:
                 # 获取所有用户分类缓存键
-                cache_keys = cache_service.redis_client.keys("user_categories:*")
+                cache_keys = await cache_service.redis_client.keys("user_categories:*")
                 if cache_keys:
-                    cache_service.redis_client.delete(*cache_keys)
+                    await cache_service.redis_client.delete(*cache_keys)
                     logger.info(f"清理了 {len(cache_keys)} 个用户分类缓存")
                 
                 # 清理该分类相关的权限缓存
-                permission_cache_keys = cache_service.redis_client.keys(f"permission:*:category:{category_id}:*")
+                permission_cache_keys = await cache_service.redis_client.keys(f"permission:*:category:{category_id}:*")
                 if permission_cache_keys:
-                    cache_service.redis_client.delete(*permission_cache_keys)
+                    await cache_service.redis_client.delete(*permission_cache_keys)
                     logger.info(f"清理了 {len(permission_cache_keys)} 个分类 {category_id} 的权限缓存")
             else:
                 # 内存缓存清理
@@ -1318,9 +1381,9 @@ async def update_category(
             # 清理所有用户的分类缓存
             if cache_service.redis_client:
                 # 获取所有用户分类缓存键
-                cache_keys = cache_service.redis_client.keys("user_categories:*")
+                cache_keys = await cache_service.redis_client.keys("user_categories:*")
                 if cache_keys:
-                    cache_service.redis_client.delete(*cache_keys)
+                    await cache_service.redis_client.delete(*cache_keys)
                     logger.info(f"清理了 {len(cache_keys)} 个用户分类缓存")
             else:
                 # 内存缓存清理
@@ -1352,9 +1415,9 @@ async def delete_category(category_id: int):
             # 清理所有用户的分类缓存
             if cache_service.redis_client:
                 # 获取所有用户分类缓存键
-                cache_keys = cache_service.redis_client.keys("user_categories:*")
+                cache_keys = await cache_service.redis_client.keys("user_categories:*")
                 if cache_keys:
-                    cache_service.redis_client.delete(*cache_keys)
+                    await cache_service.redis_client.delete(*cache_keys)
                     logger.info(f"清理了 {len(cache_keys)} 个用户分类缓存")
             else:
                 # 内存缓存清理
@@ -1404,27 +1467,17 @@ async def get_category_projects(category_id: int):
 async def check_db_pool_health():
     """检查数据库连接池健康状态"""
     try:
-        # 检查同步连接池
-        sync_status = get_pool_status()
-        sync_health = perform_pool_health_check()
-        
         # 检查异步连接池
         async_status = await get_async_pool_status()
         async_health = await perform_async_pool_health_check()
         
-        overall_health = sync_health and async_health
-        
         return {
-            "status": "healthy" if overall_health else "unhealthy",
-            "sync_pool": {
-                "status": sync_status,
-                "health_check": sync_health
-            },
+            "status": "healthy" if async_health else "unhealthy",
             "async_pool": {
                 "status": async_status,
                 "health_check": async_health
             },
-            "timestamp": sync_status.get("timestamp")
+            "timestamp": async_status.get("timestamp")
         }
     except Exception as e:
         logger.error(f"连接池健康检查失败: {e}")
@@ -1434,28 +1487,6 @@ async def check_db_pool_health():
                 "status": "error",
                 "error": str(e),
                 "timestamp": time.time()
-            }
-        )
-
-@app.get("/api/health/db-pool/sync")
-def check_sync_db_pool_health():
-    """检查同步数据库连接池健康状态"""
-    try:
-        status = get_pool_status()
-        health = perform_pool_health_check()
-        
-        return {
-            "status": "healthy" if health else "unhealthy",
-            "pool_info": status,
-            "health_check": health
-        }
-    except Exception as e:
-        logger.error(f"同步连接池健康检查失败: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "error": str(e)
             }
         )
 

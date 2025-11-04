@@ -16,6 +16,12 @@ export interface Part {
   purchase_status: string;
   process_route: string;
   remark: string;
+  serial_number: string;
+  erp_inventory_number: string;
+  status_type: string;
+  parent_part: string;
+  factory: string;
+  pbom_description: string;
   upload_batch: string;
   project_name: string;
   file_unique_id: string;
@@ -70,6 +76,12 @@ export interface MergedPart {
   purchase_status: string;
   process_route: string;
   remark: string;
+  serial_number: string;
+  erp_inventory_number: string;
+  status_type: string;
+  parent_part: string;
+  factory: string;
+  pbom_description: string;
   created_at: string;
   updated_at: string;
 }

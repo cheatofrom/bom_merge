@@ -279,7 +279,7 @@ export const deleteProject = async (projectName: string): Promise<{status: strin
 
 // 通过文件ID删除项目
 export const deleteProjectByFileId = async (fileUniqueId: string): Promise<{status: string, message: string}> => {
-  const response = await api.delete<{status: string, message: string}>(`/uploaded_files/${fileUniqueId}`);
+  const response = await authApi.delete<{status: string, message: string}>(`/uploaded_files/${fileUniqueId}`);
   return response.data;
 };
 
